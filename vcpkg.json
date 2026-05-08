@@ -1,20 +1,26 @@
 {
-    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
-    "name": "circuit-capacity-calculator",
-    "version": "0.1.0",
-    "description": "Circuit capacity calculator with BEM solver and 3D layout editor",
-    "dependencies": [
-        {
-            "name": "qtbase",
-            "default-features": false,
-            "features": ["gui", "widgets", "opengl", "concurrent"]
-        },
-        "eigen3",
-        "nlohmann-json",
-        "tinygltf",
-        {
-            "name": "catch2",
-            "version>=": "3.4.0"
-        }
-    ]
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "circuit-capacity-calculator",
+  "version": "0.1.0",
+  "description": "Circuit capacity calculator with BEM solver and 3D layout editor",
+  "dependencies": [
+    {
+      "name": "qtbase",
+      "default-features": false,
+      "features": [
+        "gui",
+        "widgets",
+        "opengl",
+        "concurrent"
+      ]
+    },
+    "eigen3",
+    "nlohmann-json",
+    "tinygltf",
+    {
+      "name": "catch2",
+      "version>=": "3.4.0"
+    }
+  ],
+  "builtin-baseline": "d29e8309d1cf7a7cb6998a935b2ac5b1958a7432"
 }
