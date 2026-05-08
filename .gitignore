@@ -1,1 +1,60 @@
-/.claude
+# Build artifacts
+build/
+out/
+*.obj
+*.o
+*.lib
+*.a
+*.exe
+*.exp
+*.pdb
+*.dll
+*.dylib
+*.so
+*.app
+
+# vcpkg (cloned by tools/bootstrap.*)
+external/vcpkg/
+external/vcpkg-binary-cache/
+vcpkg_installed/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake-build-*/
+compile_commands.json
+.cmake/
+
+# IDE — keep shared, ignore personal
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+.vs/
+.idea/
+*.user
+*.swp
+*~
+
+# Qt generated
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Caches
+.cache/
+.ccache/
+.sccache/
+
+# Misc
+*.log
+*.tmp

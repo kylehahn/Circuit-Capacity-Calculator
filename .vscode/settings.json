@@ -1,0 +1,11 @@
+{
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "clangd.arguments": ["--background-index", "--clang-tidy", "--header-insertion=never"],
+    "cmake.preferredGenerators": ["Ninja"],
+    "cmake.useCMakePresets": "always",
+    "cmake.copyCompileCommands": "${workspaceFolder}/compile_commands.json",
+    "editor.formatOnSave": true,
+    "editor.detectIndentation": false,
+    "files.insertFinalNewline": true,
+    "files.trimTrailingWhitespace": true
+}

@@ -1,0 +1,70 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "generator": "Ninja",
+            "toolchainFile": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER_LAUNCHER": "sccache",
+                "CMAKE_CXX_COMPILER_LAUNCHER": "sccache",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "windows-debug",
+            "inherits": "base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+        },
+        {
+            "name": "windows-release",
+            "inherits": "base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+        },
+        {
+            "name": "linux-debug",
+            "inherits": "base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+        },
+        {
+            "name": "linux-release",
+            "inherits": "base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+        },
+        {
+            "name": "macos-debug",
+            "inherits": "base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+        },
+        {
+            "name": "macos-release",
+            "inherits": "base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+        }
+    ],
+    "buildPresets": [
+        { "name": "windows-debug",   "configurePreset": "windows-debug"   },
+        { "name": "windows-release", "configurePreset": "windows-release" },
+        { "name": "linux-debug",     "configurePreset": "linux-debug"     },
+        { "name": "linux-release",   "configurePreset": "linux-release"   },
+        { "name": "macos-debug",     "configurePreset": "macos-debug"     },
+        { "name": "macos-release",   "configurePreset": "macos-release"   }
+    ],
+    "testPresets": [
+        { "name": "windows-debug",   "configurePreset": "windows-debug",   "output": { "outputOnFailure": true } },
+        { "name": "windows-release", "configurePreset": "windows-release", "output": { "outputOnFailure": true } },
+        { "name": "linux-debug",     "configurePreset": "linux-debug",     "output": { "outputOnFailure": true } },
+        { "name": "linux-release",   "configurePreset": "linux-release",   "output": { "outputOnFailure": true } },
+        { "name": "macos-debug",     "configurePreset": "macos-debug",     "output": { "outputOnFailure": true } },
+        { "name": "macos-release",   "configurePreset": "macos-release",   "output": { "outputOnFailure": true } }
+    ]
+}

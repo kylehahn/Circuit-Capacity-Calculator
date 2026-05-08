@@ -1,0 +1,72 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.preset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            preset: linux-release
+            shell: bash
+          - os: macos-14
+            preset: macos-release
+            shell: bash
+          - os: windows-2022
+            preset: windows-release
+            shell: pwsh
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config \
+              libgl1-mesa-dev libxkbcommon-dev libxcb1-dev libx11-xcb-dev \
+              libxcb-icccm4-dev libxcb-image0-dev libxcb-keysyms1-dev \
+              libxcb-randr0-dev libxcb-render-util0-dev libxcb-shape0-dev \
+              libxcb-sync-dev libxcb-xfixes0-dev libxcb-xkb-dev \
+              libxkbcommon-x11-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev
+
+      - name: Install macOS build deps
+        if: runner.os == 'macOS'
+        run: brew install ninja pkg-config
+
+      - name: Cache vcpkg downloads & built artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/vcpkg/archives
+            ${{ github.workspace }}/external/vcpkg/buildtrees
+            ${{ github.workspace }}/external/vcpkg/packages
+          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ matrix.os }}-
+
+      - name: Bootstrap vcpkg (Unix)
+        if: runner.os != 'Windows'
+        run: bash tools/bootstrap.sh
+
+      - name: Bootstrap vcpkg (Windows)
+        if: runner.os == 'Windows'
+        run: pwsh -File tools/bootstrap.ps1
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} -j
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
