@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(sensor3d
+project(circuit_capacity_calculator
     VERSION 0.1.0
-    DESCRIPTION "Layered sensor PCB topology editor with BEM capacitance"
+    DESCRIPTION "Circuit capacity calculator with BEM solver and 3D layout editor"
     LANGUAGES CXX
 )
 
@@ -44,7 +44,7 @@ if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
-message(STATUS "sensor3d ${PROJECT_VERSION}  (build type: ${CMAKE_BUILD_TYPE})")
+message(STATUS "circuit_capacity_calculator ${PROJECT_VERSION}  (build type: ${CMAKE_BUILD_TYPE})")
 message(STATUS "  Qt6        ${Qt6_VERSION}")
 message(STATUS "  Eigen3     ${Eigen3_VERSION}")
 message(STATUS "  OpenMP     ${OpenMP_CXX_FOUND}")

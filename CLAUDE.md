@@ -1,9 +1,9 @@
-# sensor3d — native C++ port
+# Circuit Capacity Calculator — native C++ port
 
-Layered sensor PCB topology editor with BEM capacitance computation.
-Replaces the HTML/Three.js prototype (`../sensor3d_editor.html`) with a Qt 6 +
-C++20 desktop application optimised for fast BEM solves and small, native
-distributables.
+Capacitance calculator for layered PCB topologies, with an interactive 3D
+editor. Replaces an earlier HTML/Three.js prototype (`sensor3d_editor.html`,
+kept separately as a behavioural reference) with a Qt 6 + C++20 desktop
+application optimised for fast BEM solves and small, native distributables.
 
 The JS prototype is the **behavioural specification**. Open it side-by-side
 when porting a feature and verify outputs match before checking in. Keep the
@@ -14,7 +14,7 @@ prototype editable; do not break it.
 - [ ] Project scaffold (Qt window + OpenGL viewport)
 - [ ] Data model (`Pad`, `Trace`, `FpcPad`, `Layer`, `Model`)
 - [ ] GLB import/export (parity with prototype's `userData.sensorEditor`)
-- [ ] Native JSON format (`.s3d`) — primary save format, GLB is export-only
+- [ ] Native JSON format (`.ccc`) — primary save format, GLB is export-only
 - [ ] Layer rendering (Glass, Shield, Inorganic, Sensor, Organic)
 - [ ] Pad / trace / FPC rendering
 - [ ] Selection + drag tools, modes (select / addPad / deletePad / addTrace / editTrace / moveFpc)
@@ -34,7 +34,7 @@ cmake --build --preset windows-release -j
 ctest --preset windows-release
 ```
 
-The executable lands in `build/<preset>/sensor3d{,.exe}`. CMake presets pin
+The executable lands in `build/<preset>/circuit_capacity_calculator{,.exe}`. CMake presets pin
 the vcpkg toolchain at `${sourceDir}/external/vcpkg/...`, so no environment
 variables are needed once `tools/bootstrap.{sh,ps1}` has been run.
 
@@ -109,5 +109,8 @@ Build cache: install **sccache** locally; presets already wire it as
 
 ## Where the prototype lives
 
-`../sensor3d_editor.html` (one directory up from this project) — the
-behavioural reference. Keep the URL in the README so new contributors find it.
+`sensor3d_editor.html` is the original browser-based prototype, kept in the
+`16 Sensor` working folder (separate from this repo). Open it in a browser
+when porting a feature so behaviour and numerics can be checked side-by-side.
+If you bring it into this repo for convenience, drop it under `docs/prototype/`
+and update this section with the path.

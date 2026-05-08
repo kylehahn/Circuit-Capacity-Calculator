@@ -1,15 +1,14 @@
-# sensor3d
+# Circuit Capacity Calculator
 
-Native Qt 6 + C++20 desktop editor for layered sensor PCB topology with BEM
-capacitance computation. The browser prototype lives at
-[`../sensor3d_editor.html`](../sensor3d_editor.html) and remains the
-behavioural reference during the port.
+Native Qt 6 + C++20 desktop calculator and 3D editor for capacitance of
+layered PCB topologies, solved via BEM. The original browser prototype
+(`sensor3d_editor.html`) is kept separately as a behavioural reference.
 
 ## Quick start (any platform)
 
 ```
-git clone <repo-url> sensor3d
-cd sensor3d
+git clone <repo-url> circuit-capacity-calculator
+cd circuit-capacity-calculator
 # 1. Bootstrap vcpkg (one-time per machine, idempotent):
 tools/bootstrap.sh         # macOS / Linux
 tools\bootstrap.ps1        # Windows (PowerShell)
@@ -20,7 +19,7 @@ cmake --build --preset linux-release -j
 ctest --preset linux-release
 
 # 3. Run:
-./build/linux-release/sensor3d
+./build/linux-release/circuit_capacity_calculator
 ```
 
 > First configure compiles Qt from source via vcpkg — **30–60 minutes**. Every
@@ -71,7 +70,7 @@ machine.
 ## Layout
 
 ```
-sensor3d-native/
+circuit-capacity-calculator/
 ├── CLAUDE.md                project context for the AI dev assistant
 ├── README.md                this file
 ├── CMakeLists.txt           top-level build
@@ -96,11 +95,11 @@ sensor3d-native/
 
 ## A note on paths with spaces
 
-If your local clone path contains spaces (e.g. inherited from a workspace
-folder named `16 Sensor`), CMake and vcpkg can occasionally misbehave. The
-safe move is to clone this repo into a path **without spaces**, e.g.
-`C:\dev\sensor3d` or `~/code/sensor3d`. The scaffold itself is portable —
-just `git clone` to the new path on the new machine.
+If your local clone path contains spaces, CMake and vcpkg can occasionally
+misbehave. The safe move is to clone this repo into a path **without spaces**,
+e.g. `C:\dev\circuit-capacity-calculator` or `~/code/circuit-capacity-calculator`.
+The scaffold itself is portable — just `git clone` to the new path on the
+new machine.
 
 ## License
 

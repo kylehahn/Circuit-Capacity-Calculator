@@ -1,8 +1,8 @@
 {
     "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
-    "name": "sensor3d",
+    "name": "circuit-capacity-calculator",
     "version": "0.1.0",
-    "description": "Layered sensor PCB topology editor with BEM capacitance",
+    "description": "Circuit capacity calculator with BEM solver and 3D layout editor",
     "dependencies": [
         {
             "name": "qtbase",
