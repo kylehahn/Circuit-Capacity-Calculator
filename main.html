@@ -1,0 +1,2100 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>3D Sensor Editor — 16 Sensor Topology</title>
+<style>
+  :root {
+    --bg: #1a1d23;
+    --panel: #23272f;
+    --panel2: #2b2f37;
+    --border: #3a3f48;
+    --text: #e6e8eb;
+    --muted: #9aa3ad;
+    --accent: #4cc2ff;
+    --accent2: #ffb84c;
+    --danger: #ff5d5d;
+    --ok: #3fcf8e;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Helvetica Neue", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    font-size: 13px; user-select: none; overflow: hidden;
+  }
+  #app { display: grid;
+    grid-template-rows: 44px 1fr;
+    grid-template-columns: 270px 1fr 290px;
+    grid-template-areas: "topbar topbar topbar" "left center right";
+    height: 100%;
+  }
+  #topbar { grid-area: topbar; display: flex; align-items: center; gap: 6px;
+    padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  #topbar h1 { font-size: 14px; font-weight: 600; margin: 0 14px 0 0; letter-spacing: 0.3px; color: var(--accent); }
+  #topbar .spacer { flex: 1; }
+  .divider { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+  #leftPanel { grid-area: left; background: var(--panel); border-right: 1px solid var(--border);
+    overflow-y: auto; padding: 10px; }
+  #rightPanel { grid-area: right; background: var(--panel); border-left: 1px solid var(--border);
+    overflow-y: auto; padding: 10px; }
+  #centerPanel { grid-area: center; position: relative; background: #0f1115; }
+  #canvas { display: block; width: 100%; height: 100%; }
+  #viewBar { position: absolute; left: 12px; top: 12px; display: flex; gap: 6px; flex-wrap: wrap; max-width: 50%; }
+  #hudBar { position: absolute; right: 12px; top: 12px; display: flex; gap: 6px; flex-direction: column; align-items: flex-end; }
+  #helpBar { position: absolute; left: 12px; bottom: 12px; right: 12px; padding: 8px 10px;
+    background: rgba(20,22,26,0.7); border: 1px solid var(--border); border-radius: 6px;
+    font-size: 12px; color: var(--muted); pointer-events: none; }
+  #helpBar b { color: var(--text); }
+
+  /* marquee overlay */
+  #marqueeOverlay { position: absolute; pointer-events: none; border: 1.5px dashed var(--accent);
+    background: rgba(76,194,255,0.10); display: none; }
+
+  button, .btn { background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+    transition: background 0.12s, border-color 0.12s; }
+  button:hover, .btn:hover { background: #343943; border-color: #4a505b; }
+  button.active, .btn.active { background: #1a4870; border-color: var(--accent); color: var(--accent); }
+  button.primary { background: #1f6fb0; border-color: #2a8ad8; color: white; }
+  button.primary:hover { background: #2a8ad8; }
+  button.danger { background: #6f2222; border-color: #b04a4a; color: #ffd0d0; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .panelTitle { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted);
+    margin: 12px 0 6px 0; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .panelTitle:first-child { margin-top: 0; }
+  .row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+  .row label { flex: 1; color: var(--muted); font-size: 12px; }
+  .row input[type=number], .row input[type=text], .row select { background: var(--panel2);
+    color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+    padding: 4px 6px; font-size: 12px; width: 80px; font-family: inherit; }
+  .row input[type=range] { flex: 2; }
+  .row input[type=color] { width: 28px; height: 22px; border: 1px solid var(--border); border-radius: 3px; padding: 0; background: transparent; cursor: pointer; }
+  .row input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+
+  .modeBtns { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+  .modeBtns button { font-size: 11px; padding: 6px 4px; }
+  .layerRow { display: grid; grid-template-columns: 18px 1fr 50px 18px; gap: 6px; align-items: center;
+    padding: 4px 0; border-bottom: 1px solid #2c3038; }
+  .layerRow:last-child { border-bottom: none; }
+  .layerRow .name { font-size: 12px; color: var(--text); }
+  .layerRow .thick { font-size: 11px; color: var(--muted); text-align: right; }
+  .listItem { display: flex; justify-content: space-between; align-items: center;
+    padding: 4px 6px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    border: 1px solid transparent; }
+  .listItem:hover { background: #2c3038; }
+  .listItem.selected { background: #1a4870; border-color: var(--accent); }
+  .listItem .meta { color: var(--muted); font-size: 11px; }
+  .listScroll { max-height: 140px; overflow-y: auto; border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px; background: #1c1f25; }
+
+  .pill { display: inline-block; padding: 1px 6px; border-radius: 10px;
+    background: #2c3038; color: var(--muted); font-size: 10px; }
+  .badge { background: var(--accent); color: #00121c; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+  .hint { font-size: 11px; color: var(--muted); line-height: 1.4; }
+  .empty { color: var(--muted); font-size: 11px; padding: 6px; font-style: italic; }
+  .small { font-size: 11px; color: var(--muted); }
+
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
+    display: none; align-items: center; justify-content: center; }
+  .modal.open { display: flex; }
+  .modal .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 20px; width: 380px; box-shadow: 0 12px 30px rgba(0,0,0,0.6); }
+  .modal h2 { margin: 0 0 12px 0; font-size: 14px; }
+  .modal .row label { flex: 0 0 100px; }
+  .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #3a3f48; border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  .toast { position: fixed; bottom: 56px; left: 50%; transform: translateX(-50%);
+    background: rgba(40,44,52,0.95); border: 1px solid var(--border); padding: 8px 14px;
+    border-radius: 6px; color: var(--text); font-size: 12px; opacity: 0; transition: opacity 0.2s;
+    pointer-events: none; z-index: 200; }
+  .toast.show { opacity: 1; }
+  .toast.error { border-color: var(--danger); color: #ffd0d0; }
+  .toast.ok { border-color: var(--ok); color: #d0ffe0; }
+
+  /* mode-specific cursors on canvas */
+  body.mode-select   #canvas { cursor: default; }
+  body.mode-addPad   #canvas { cursor: crosshair; }
+  body.mode-deletePad #canvas { cursor: not-allowed; }
+  body.mode-addTrace #canvas { cursor: cell; }
+  body.mode-editTrace #canvas { cursor: cell; }
+  body.mode-moveFpc  #canvas { cursor: move; }
+  body.placing #canvas { cursor: copy; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <h1>3D Sensor Editor</h1>
+    <button id="btnNew">새로 만들기</button>
+    <button id="btnLoad">📂 불러오기</button>
+    <button id="btnSave" class="primary">💾 저장</button>
+    <span class="divider"></span>
+    <button id="btnUndo" title="되돌리기 (Ctrl+Z)">↶ 되돌리기</button>
+    <button id="btnRedo" title="다시하기 (Ctrl+Y)">↷ 다시하기</button>
+    <span class="divider"></span>
+    <button id="btnCopy" title="복사 → 마우스 따라 배치 (Ctrl+D)">⎘ 복사</button>
+    <button id="btnOrtho" title="직각 모드 토글 (O)">⌐ 직각 모드</button>
+    <span class="divider"></span>
+    <button id="btnCap" title="선택된 두 트레이스의 캐패시턴스 (BEM)">⚡ Cap 계산</button>
+    <input type="file" id="fileInput" accept=".glb,.gltf" hidden>
+    <span class="spacer"></span>
+    <span class="small" id="statusInfo">패드: 0 · 트레이스: 0 · FPC: 0</span>
+  </div>
+
+  <div id="leftPanel">
+    <div class="panelTitle">편집 모드</div>
+    <div class="modeBtns">
+      <button data-mode="select" class="active">🖱 선택/이동 (1)</button>
+      <button data-mode="addPad">＋ 패드 추가 (2)</button>
+      <button data-mode="deletePad">🗑 삭제 (3)</button>
+      <button data-mode="addTrace">⤳ 트레이스 (4)</button>
+      <button data-mode="editTrace">✏️ 트레이스 편집 (5)</button>
+      <button data-mode="moveFpc">📐 FPC (6)</button>
+    </div>
+    <div class="hint" id="modeHint" style="margin-top:6px"></div>
+
+    <div class="panelTitle">기판 (Glass)</div>
+    <div class="row"><label>Glass H (mm)</label><input type="number" id="glassW" min="5" max="500" step="0.1"></div>
+    <div class="row"><label>Glass V (mm)</label><input type="number" id="glassH" min="5" max="500" step="0.1"></div>
+    <div class="row"><label>두께 (mm)</label><input type="number" id="glassT" min="0.1" max="50" step="0.1"></div>
+
+    <div class="panelTitle">레이어 표시</div>
+    <div id="layerList"></div>
+
+    <div class="panelTitle">그리드 / 스냅</div>
+    <div class="row"><label>스냅 켜기</label><input type="checkbox" id="snapToggle" checked></div>
+    <div class="row"><label>스냅 간격 (mm)</label><input type="number" id="snapSize" min="0.05" max="20" step="0.05" value="0.5" style="width:80px"></div>
+    <div class="row"><label>그리드 표시</label><input type="checkbox" id="gridToggle" checked></div>
+
+    <div class="panelTitle">패드 그리드 프리셋</div>
+    <div class="row">
+      <select id="presetCols" style="flex:1"><option>2</option><option>3</option><option selected>4</option><option>5</option><option>6</option><option>8</option><option>10</option></select>
+      <span>×</span>
+      <select id="presetRows" style="flex:1"><option>2</option><option>3</option><option selected>4</option><option>5</option><option>6</option><option>8</option><option>10</option></select>
+      <button id="btnApplyGrid">적용</button>
+    </div>
+    <div class="hint">적용 시 기존 패드/트레이스/FPC가 새로 생성됩니다.</div>
+    <div class="row" style="margin-top:6px">
+      <label>패드 지름 (mm)</label><input type="number" id="presetDia" value="12" min="0.1" step="0.1">
+    </div>
+    <div class="row">
+      <label>패드 간격 (mm)</label><input type="number" id="presetPitch" value="30" min="0.5" step="0.1">
+    </div>
+  </div>
+
+  <div id="centerPanel">
+    <canvas id="canvas"></canvas>
+    <div id="marqueeOverlay"></div>
+    <div id="viewBar">
+      <button id="viewTop">위에서</button>
+      <button id="viewIso">아이소(45°)</button>
+      <button id="viewFront">정면</button>
+      <button id="viewSide">측면</button>
+      <button id="viewFit">화면 맞춤</button>
+    </div>
+    <div id="hudBar">
+      <span class="pill" id="hoverInfo">—</span>
+      <span class="pill" id="cursorInfo">x: 0.0 mm  y: 0.0 mm</span>
+      <span class="pill" id="orthoInfo" style="display:none">⌐ ORTHO</span>
+      <span class="pill" id="placingInfo" style="display:none; color:#4cc2ff">📋 배치 중</span>
+    </div>
+    <div id="helpBar">
+      <b>마우스</b>: 좌클릭=액션, 우클릭+드래그=궤도, 가운데=팬, 휠=줌 ·
+      <b>선택 모드 빈 공간 드래그</b>=다중선택 ·
+      <b>Ctrl+Z/Y</b>=되돌리기/다시하기 ·
+      <b>Ctrl+D</b>=복사·배치 ·
+      <b>R</b>=배치 중 좌우반전 ·
+      <b>O</b>=직각 모드 ·
+      <b>Esc</b>=취소
+    </div>
+  </div>
+
+  <div id="rightPanel">
+    <div class="panelTitle">선택된 항목</div>
+    <div id="selectionPanel"><div class="empty">선택된 항목 없음</div></div>
+
+    <div class="panelTitle">패드 목록 <span class="small" id="padCount"></span></div>
+    <div id="padList" class="listScroll"></div>
+
+    <div class="panelTitle">트레이스 목록 <span class="small" id="traceCount"></span></div>
+    <div id="traceList" class="listScroll"></div>
+
+    <div class="panelTitle">FPC 패드</div>
+    <div id="fpcList" class="listScroll"></div>
+  </div>
+</div>
+
+<div class="modal" id="confirmModal">
+  <div class="box">
+    <h2 id="confirmTitle">확인</h2>
+    <p id="confirmBody" style="color:var(--muted); font-size:12px;"></p>
+    <div class="actions">
+      <button id="confirmCancel">취소</button>
+      <button id="confirmOk" class="primary">확인</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="capModal">
+  <div class="box" style="width:480px">
+    <h2>⚡ BEM 캐패시턴스 계산</h2>
+    <div id="capBody"></div>
+    <div class="actions">
+      <button id="capClose">닫기</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
+
+// ========== Default model ==========
+const DEFAULT_LAYERS = [
+  { id: 'shield',    name: 'Shield',          thickness: 0.05, color: '#f0a040', opacity: 0.85, visible: true },
+  { id: 'inorganic', name: 'Inorganic layer', thickness: 0.10, color: '#a0a0a0', opacity: 0.75, visible: true },
+  { id: 'sensor',    name: 'Sensor / Trace',  thickness: 0.05, color: '#3a3a3a', opacity: 1.00, visible: true },
+  { id: 'organic',   name: 'Organic layer',   thickness: 0.10, color: '#d0d4dc', opacity: 0.45, visible: true },
+];
+
+function generateGrid(cols, rows, padDia, pitch) {
+  const margin = 6.0, fpcRowHeight = 4.0;
+  const fpcCount = cols * rows;
+  // Routing space below the lowest pad row, scaled with the number of channels
+  const routingH = Math.max(6.0, fpcCount * 0.7 + 1.0);
+  const glassW = (cols - 1) * pitch + padDia + margin * 2;
+  const glassH = (rows - 1) * pitch + padDia + margin * 2 + fpcRowHeight + routingH;
+  const sensorAreaCenterY = (fpcRowHeight + routingH) / 2;
+  const startX = -((cols - 1) * pitch) / 2;
+  const startY = sensorAreaCenterY - ((rows - 1) * pitch) / 2;
+  const pads = [];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    pads.push({ id: `P${r*cols+c+1}`, x:+(startX+c*pitch).toFixed(3), y:+(startY+r*pitch).toFixed(3),
+      shape:'circle', size:padDia, size2:padDia });
+  }
+  // FPC strip at the bottom, evenly spread across the column span
+  const fpcSpacing = (cols * pitch) / fpcCount;
+  const fpcStartX = -((fpcCount - 1) * fpcSpacing) / 2;
+  const fpcStripY = -glassH / 2 + margin / 2 + fpcRowHeight / 2;
+  const fpcPads = [];
+  for (let i = 0; i < fpcCount; i++) {
+    fpcPads.push({ id:`F${i+1}`, x:+(fpcStartX+i*fpcSpacing).toFixed(3), y:+fpcStripY.toFixed(3),
+      width:1.2, height:fpcRowHeight });
+  }
+  // Non-overlapping fan-out routing.
+  // Each column's pads connect to a contiguous block of FPC pads centered on
+  // the column's X (block c spans fpc[c*rows .. c*rows+rows-1]). Within a
+  // column the rows are mapped "inside-out": even rows go LEFT, odd rows go
+  // RIGHT; lower-indexed rows take the inner FPC of their side, higher rows
+  // the outer FPC. The drop X follows the same scheme so closer FPCs get
+  // shorter drop channels and farther FPCs get longer ones, guaranteeing
+  // that no two trace segments cross.
+  const traces = [];
+  const baseOffset = padDia / 2 + 0.6;
+  const offsetStep = 0.8;
+  const numLeft = Math.ceil(rows / 2);
+  const dropOffsetForRow = (r) => {
+    const layer = Math.floor(r / 2);
+    return (r % 2 === 0 ? -1 : 1) * (baseOffset + layer * offsetStep);
+  };
+  const fpcIdxForRow = (c, r) => {
+    const layer = Math.floor(r / 2);
+    if (r % 2 === 0) return c * rows + (numLeft - 1 - layer); // left side: inner first
+    else             return c * rows + (numLeft + layer);     // right side: inner first
+  };
+  const channelTop    = startY - padDia / 2 - 0.6;
+  const channelBottom = (fpcStripY + fpcRowHeight / 2) + 0.6;
+  const dy = (channelTop - channelBottom) / (fpcCount + 1);
+  for (let i = 0; i < pads.length; i++) {
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+    const p = pads[i];
+    const fpcIdx = fpcIdxForRow(c, r);
+    const f = fpcPads[fpcIdx]; if (!f) continue;
+    const offset = dropOffsetForRow(r);
+    const dropX  = +(p.x + offset).toFixed(3);
+    const chY    = +(channelTop - (i + 1) * dy).toFixed(3);
+    traces.push({
+      id: `T${i + 1}`, from: p.id, to: f.id, width: 0.4,
+      waypoints: [
+        [dropX, +p.y.toFixed(3)],
+        [dropX, chY],
+        [+f.x.toFixed(3), chY],
+      ],
+    });
+  }
+  return {
+    meta: { type: '16Sensor3D', version: '1.0', createdAt: new Date().toISOString() },
+    glass: { width:+glassW.toFixed(2), height:+glassH.toFixed(2), thickness: 5.0,
+      color: '#bcdde8', opacity: 0.30, visible: true },
+    layers: JSON.parse(JSON.stringify(DEFAULT_LAYERS)),
+    pads, fpcPads, traces,
+  };
+}
+function defaultModel() { return generateGrid(4, 4, 12.0, 30.0); }
+
+// ========== State ==========
+const State = {
+  model: defaultModel(),
+  mode: 'select',
+  selected: null,                                       // { type, id }
+  hover:    null,
+  multiSelect: { pads: new Set(), traces: new Set(), fpcs: new Set() },
+  snapEnabled: true,
+  snapSize: 0.5,
+  showGrid: true,
+  orthoMode: false,
+  traceDraft: null,                                     // { fromPadId, waypoints, cursor }
+  drag: null,                                           // { type, ... }
+  marquee: null,                                        // { x0, y0, x1, y1 } in CSS px relative to canvas
+  placing: null,                                        // { items, cursorXY, mirrored }
+};
+
+// ========== Three.js setup ==========
+const canvas = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setClearColor(0x0f1115, 1);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 2000);
+camera.position.set(40, -60, 70);
+camera.lookAt(0, 0, 0);
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
+controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_ROTATE };
+controls.minDistance = 5;
+controls.maxDistance = 600;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const dl1 = new THREE.DirectionalLight(0xffffff, 0.7); dl1.position.set(40, -30, 80); scene.add(dl1);
+const dl2 = new THREE.DirectionalLight(0xffffff, 0.35); dl2.position.set(-40, 50, 30); scene.add(dl2);
+
+let gridHelper = null;
+function rebuildGrid() {
+  if (gridHelper) { scene.remove(gridHelper); gridHelper.geometry.dispose(); }
+  if (!State.showGrid) { gridHelper = null; return; }
+  const size = Math.max(State.model.glass.width, State.model.glass.height) * 1.2;
+  gridHelper = new THREE.GridHelper(size, Math.round(size), 0x445566, 0x2a3038);
+  gridHelper.rotation.x = Math.PI / 2;
+  gridHelper.position.z = -State.model.glass.thickness - 0.01;
+  gridHelper.material.transparent = true;
+  gridHelper.material.opacity = 0.6;
+  scene.add(gridHelper);
+}
+
+const axes = new THREE.AxesHelper(8); scene.add(axes);
+const layerGroup  = new THREE.Group(); scene.add(layerGroup);
+const padGroup    = new THREE.Group(); scene.add(padGroup);
+const traceGroup  = new THREE.Group(); scene.add(traceGroup);
+const fpcGroup    = new THREE.Group(); scene.add(fpcGroup);
+const overlayGroup = new THREE.Group(); scene.add(overlayGroup);
+const ghostGroup   = new THREE.Group(); scene.add(ghostGroup);
+
+// ========== Layer Z helpers ==========
+function getLayer(id) { return State.model.layers.find(l => l.id === id); }
+function layerZTop(id) { let z = 0; for (const l of State.model.layers) { z += l.thickness; if (l.id === id) return z; } return z; }
+function layerZBottom(id) { return layerZTop(id) - getLayer(id).thickness; }
+
+// ========== Geometry helpers ==========
+function roundedRectShape(w, h, r) {
+  const shape = new THREE.Shape();
+  r = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+  const x = -w / 2, y = -h / 2;
+  shape.moveTo(x + r, y);
+  shape.lineTo(x + w - r, y);
+  shape.quadraticCurveTo(x + w, y, x + w, y + r);
+  shape.lineTo(x + w, y + h - r);
+  shape.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  shape.lineTo(x + r, y + h);
+  shape.quadraticCurveTo(x, y + h, x, y + h - r);
+  shape.lineTo(x, y + r);
+  shape.quadraticCurveTo(x, y, x + r, y);
+  return shape;
+}
+function buildPadGeom(pad, depth) {
+  switch (pad.shape) {
+    case 'circle': { const g = new THREE.CylinderGeometry(pad.size/2, pad.size/2, depth, 64); g.rotateX(Math.PI/2); return g; }
+    case 'square':   return new THREE.BoxGeometry(pad.size, pad.size, depth);
+    case 'ellipse': {
+      const shape = new THREE.Shape();
+      const rx = pad.size/2, ry = (pad.size2 || pad.size)/2;
+      const N = 64;
+      for (let i = 0; i <= N; i++) {
+        const t = (i / N) * Math.PI * 2;
+        const x = Math.cos(t) * rx, y = Math.sin(t) * ry;
+        if (i === 0) shape.moveTo(x, y); else shape.lineTo(x, y);
+      }
+      return new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false, curveSegments: 32 });
+    }
+    case 'roundedSquare': {
+      const r = pad.size2 || pad.size * 0.2;
+      const shape = roundedRectShape(pad.size, pad.size, r);
+      return new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false, curveSegments: 16 });
+    }
+  }
+}
+
+// ========== Materials ==========
+const Materials = {
+  glass:      new THREE.MeshPhysicalMaterial({ color: 0xbcdde8, transparent: true, opacity: 0.30, roughness: 0.05, transmission: 0.7, thickness: 1.0, ior: 1.5, side: THREE.DoubleSide }),
+  shield:     new THREE.MeshStandardMaterial({ color: 0xf0a040, roughness: 0.45, metalness: 0.7 }),
+  inorganic:  new THREE.MeshStandardMaterial({ color: 0xa0a0a0, transparent: true, opacity: 0.75, roughness: 0.5, metalness: 0.2 }),
+  organic:    new THREE.MeshStandardMaterial({ color: 0xd0d4dc, transparent: true, opacity: 0.45, roughness: 0.4, metalness: 0.0, side: THREE.DoubleSide }),
+  pad:        new THREE.MeshStandardMaterial({ color: 0x404040, roughness: 0.30, metalness: 0.92 }),
+  padHover:   new THREE.MeshStandardMaterial({ color: 0xfff0a0, roughness: 0.30, metalness: 0.85, emissive: 0x554400, emissiveIntensity: 0.4 }),
+  padSelect:  new THREE.MeshStandardMaterial({ color: 0x4cc2ff, roughness: 0.30, metalness: 0.85, emissive: 0x143040, emissiveIntensity: 0.55 }),
+  trace:      new THREE.MeshStandardMaterial({ color: 0x404040, roughness: 0.30, metalness: 0.92 }),
+  traceHover: new THREE.MeshStandardMaterial({ color: 0xfff0a0, roughness: 0.3, metalness: 0.7, emissive: 0x554400, emissiveIntensity: 0.4 }),
+  traceSelect:new THREE.MeshStandardMaterial({ color: 0x4cc2ff, roughness: 0.3, metalness: 0.7, emissive: 0x143040, emissiveIntensity: 0.55 }),
+  fpc:        new THREE.MeshStandardMaterial({ color: 0x3a6ee8, roughness: 0.45, metalness: 0.4 }),
+  fpcSelect:  new THREE.MeshStandardMaterial({ color: 0x4cc2ff, roughness: 0.4, metalness: 0.4, emissive: 0x143040, emissiveIntensity: 0.55 }),
+  draftLine:  new THREE.LineBasicMaterial({ color: 0x4cc2ff }),
+  ghostPad:   new THREE.MeshStandardMaterial({ color: 0x4cc2ff, transparent: true, opacity: 0.55, roughness: 0.4, metalness: 0.3, emissive: 0x144060, emissiveIntensity: 0.5 }),
+  ghostTrace: new THREE.MeshStandardMaterial({ color: 0x4cc2ff, transparent: true, opacity: 0.55, roughness: 0.4, metalness: 0.3, emissive: 0x144060, emissiveIntensity: 0.5 }),
+  ghostFpc:   new THREE.MeshStandardMaterial({ color: 0x4cc2ff, transparent: true, opacity: 0.45, roughness: 0.4, metalness: 0.3 }),
+  waypoint:   new THREE.MeshStandardMaterial({ color: 0xffb84c, roughness: 0.3, metalness: 0.4, emissive: 0x553300, emissiveIntensity: 0.6 }),
+};
+
+// ========== Selection helpers ==========
+function isSelected(type, id) {
+  if (State.selected?.type === type && State.selected.id === id) return true;
+  if (type === 'pad'   && State.multiSelect.pads.has(id))   return true;
+  if (type === 'trace' && State.multiSelect.traces.has(id)) return true;
+  if (type === 'fpc'   && State.multiSelect.fpcs.has(id))   return true;
+  return false;
+}
+function isHovered(type, id) {
+  return State.hover?.type === type && State.hover.id === id;
+}
+function clearMultiSelect() {
+  State.multiSelect.pads.clear();
+  State.multiSelect.traces.clear();
+  State.multiSelect.fpcs.clear();
+}
+function multiSelectCount() {
+  return State.multiSelect.pads.size + State.multiSelect.traces.size + State.multiSelect.fpcs.size;
+}
+
+// ========== Build scene ==========
+function clearGroup(g) { while (g.children.length) { const c = g.children.pop(); if (c.geometry) c.geometry.dispose(); } }
+
+function buildLayers() {
+  clearGroup(layerGroup);
+  const m = State.model;
+  if (m.glass.visible !== false) {
+    const gg = new THREE.BoxGeometry(m.glass.width, m.glass.height, m.glass.thickness);
+    const mesh = new THREE.Mesh(gg, Materials.glass);
+    mesh.position.set(0, 0, -m.glass.thickness / 2);
+    layerGroup.add(mesh);
+  }
+  let z = 0;
+  for (const l of m.layers) {
+    if (!l.visible) { z += l.thickness; continue; }
+    if (l.id === 'sensor') { z += l.thickness; continue; }
+    const geom = new THREE.BoxGeometry(m.glass.width, m.glass.height, l.thickness);
+    let mat;
+    if (l.id === 'shield') mat = Materials.shield;
+    else if (l.id === 'inorganic') mat = Materials.inorganic;
+    else if (l.id === 'organic') mat = Materials.organic;
+    else mat = new THREE.MeshStandardMaterial({ color: l.color, transparent: true, opacity: l.opacity });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.set(0, 0, z + l.thickness / 2);
+    layerGroup.add(mesh);
+    z += l.thickness;
+  }
+}
+
+function padMaterialFor(p) {
+  if (isSelected('pad', p.id)) return Materials.padSelect;
+  if (isHovered('pad', p.id))  return Materials.padHover;
+  return Materials.pad;
+}
+function traceMaterialFor(t) {
+  if (isSelected('trace', t.id)) return Materials.traceSelect;
+  if (isHovered('trace', t.id))  return Materials.traceHover;
+  return Materials.trace;
+}
+function fpcMaterialFor(f) {
+  if (isSelected('fpc', f.id)) return Materials.fpcSelect;
+  return Materials.fpc;
+}
+
+function buildPads() {
+  clearGroup(padGroup);
+  const sensor = getLayer('sensor');
+  if (!sensor.visible) return;
+  const zBottom = layerZBottom('sensor');
+  for (const p of State.model.pads) {
+    const geom = buildPadGeom(p, sensor.thickness);
+    const mat = padMaterialFor(p);
+    const mesh = new THREE.Mesh(geom, mat);
+    if (['ellipse','roundedSquare'].includes(p.shape)) {
+      mesh.position.set(p.x, p.y, zBottom);
+    } else {
+      mesh.position.set(p.x, p.y, zBottom + sensor.thickness / 2);
+    }
+    mesh.userData = { kind: 'pad', id: p.id };
+    padGroup.add(mesh);
+  }
+}
+
+function buildTraces() {
+  clearGroup(traceGroup);
+  const sensor = getLayer('sensor');
+  if (!sensor.visible) return;
+  const zBottom = layerZBottom('sensor');
+  const zCenter = zBottom + sensor.thickness / 2;
+  const h = sensor.thickness;
+  for (const t of State.model.traces) {
+    const points = traceFullPath(t);
+    if (points.length < 2) continue;
+    const mat = traceMaterialFor(t);
+    const sub = new THREE.Group();
+    for (let i = 0; i < points.length - 1; i++) {
+      const [x0, y0] = points[i], [x1, y1] = points[i + 1];
+      const dx = x1 - x0, dy = y1 - y0;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-6) continue;
+      const angle = Math.atan2(dy, dx);
+      const seg = new THREE.Mesh(new THREE.BoxGeometry(len, t.width, h), mat);
+      seg.position.set((x0 + x1) / 2, (y0 + y1) / 2, zCenter);
+      seg.rotation.z = angle;
+      seg.userData = { kind: 'trace', id: t.id, segment: i };
+      sub.add(seg);
+    }
+    for (let i = 0; i < points.length; i++) {
+      const [x, y] = points[i];
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(t.width / 2, t.width / 2, h, 24), mat);
+      cap.geometry.rotateX(Math.PI / 2);
+      cap.position.set(x, y, zCenter);
+      cap.userData = { kind: 'trace', id: t.id, joint: i };
+      sub.add(cap);
+    }
+    traceGroup.add(sub);
+
+    if (isSelected('trace', t.id)) {
+      const ztop = zBottom + h + 0.3;
+      for (let i = 0; i < t.waypoints.length; i++) {
+        const [x, y] = t.waypoints[i];
+        const handle = new THREE.Mesh(new THREE.SphereGeometry(Math.max(0.5, t.width * 0.9), 16, 12), Materials.waypoint);
+        handle.position.set(x, y, ztop);
+        handle.userData = { kind: 'waypoint', traceId: t.id, idx: i };
+        traceGroup.add(handle);
+      }
+    }
+  }
+}
+
+function buildFpcPads() {
+  clearGroup(fpcGroup);
+  const sensor = getLayer('sensor');
+  if (!sensor.visible) return;
+  const zBottom = layerZBottom('sensor');
+  const zCenter = zBottom + sensor.thickness / 2;
+  for (const f of State.model.fpcPads) {
+    const mat = fpcMaterialFor(f);
+    const geom = new THREE.BoxGeometry(f.width, f.height, sensor.thickness);
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.set(f.x, f.y, zCenter);
+    mesh.userData = { kind: 'fpc', id: f.id };
+    fpcGroup.add(mesh);
+  }
+}
+
+function traceFullPath(t) {
+  const pts = [];
+  const fromPad = State.model.pads.find(p => p.id === t.from);
+  const fromFpc = State.model.fpcPads.find(p => p.id === t.from);
+  if (fromPad) pts.push([fromPad.x, fromPad.y]);
+  else if (fromFpc) pts.push([fromFpc.x, fromFpc.y]);
+  for (const w of t.waypoints) pts.push([w[0], w[1]]);
+  const toPad = State.model.pads.find(p => p.id === t.to);
+  const toFpc = State.model.fpcPads.find(p => p.id === t.to);
+  if (toPad) pts.push([toPad.x, toPad.y]);
+  else if (toFpc) pts.push([toFpc.x, toFpc.y]);
+  return pts;
+}
+
+// Draft trace overlay & ghost
+function buildOverlay() {
+  clearGroup(overlayGroup);
+  if (State.traceDraft) {
+    const fromPad = State.model.pads.find(p => p.id === State.traceDraft.fromPadId);
+    if (fromPad) {
+      const pts = [[fromPad.x, fromPad.y], ...State.traceDraft.waypoints];
+      if (State.traceDraft.cursor) pts.push(State.traceDraft.cursor);
+      const z = layerZTop('sensor') + 0.4;
+      const path = new THREE.BufferGeometry().setFromPoints(pts.map(p => new THREE.Vector3(p[0], p[1], z)));
+      overlayGroup.add(new THREE.Line(path, Materials.draftLine));
+      for (let i = 1; i < pts.length; i++) {
+        const m = new THREE.Mesh(new THREE.SphereGeometry(0.4, 12, 8), Materials.waypoint);
+        m.position.set(pts[i][0], pts[i][1], z); overlayGroup.add(m);
+      }
+    }
+  }
+}
+
+function buildGhost() {
+  clearGroup(ghostGroup);
+  if (!State.placing) return;
+  const sensor = getLayer('sensor');
+  const zBottom = layerZBottom('sensor');
+  const zCenter = zBottom + sensor.thickness / 2 + 0.6; // slightly above for visibility
+  const items = State.placing.items;
+  const [cx, cy] = State.placing.cursorXY;
+  const flip = State.placing.mirrored ? -1 : 1;
+
+  // Pads
+  for (const p of items.pads) {
+    const geom = buildPadGeom(p, sensor.thickness);
+    const mesh = new THREE.Mesh(geom, Materials.ghostPad);
+    const px = cx + p.relx * flip, py = cy + p.rely;
+    if (['ellipse','roundedSquare'].includes(p.shape)) mesh.position.set(px, py, zCenter - sensor.thickness / 2);
+    else mesh.position.set(px, py, zCenter);
+    if (flip < 0 && (p.shape === 'ellipse' || p.shape === 'roundedSquare')) {
+      mesh.scale.x = -1;
+    }
+    ghostGroup.add(mesh);
+  }
+  // FPCs
+  for (const f of items.fpcs) {
+    const geom = new THREE.BoxGeometry(f.width, f.height, sensor.thickness);
+    const mesh = new THREE.Mesh(geom, Materials.ghostFpc);
+    mesh.position.set(cx + f.relx * flip, cy + f.rely, zCenter);
+    ghostGroup.add(mesh);
+  }
+  // Traces (using polyline points relative to centroid)
+  for (const t of items.traces) {
+    const pts = t.points.map(([rx, ry]) => [cx + rx * flip, cy + ry]);
+    const sub = new THREE.Group();
+    for (let i = 0; i < pts.length - 1; i++) {
+      const [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
+      const dx = x1 - x0, dy = y1 - y0; const len = Math.hypot(dx, dy);
+      if (len < 1e-6) continue;
+      const seg = new THREE.Mesh(new THREE.BoxGeometry(len, t.width, sensor.thickness), Materials.ghostTrace);
+      seg.position.set((x0+x1)/2, (y0+y1)/2, zCenter);
+      seg.rotation.z = Math.atan2(dy, dx);
+      sub.add(seg);
+    }
+    for (const [x, y] of pts) {
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(t.width/2, t.width/2, sensor.thickness, 24), Materials.ghostTrace);
+      cap.geometry.rotateX(Math.PI/2);
+      cap.position.set(x, y, zCenter);
+      sub.add(cap);
+    }
+    ghostGroup.add(sub);
+  }
+}
+
+function rebuildAll() {
+  buildLayers(); buildPads(); buildTraces(); buildFpcPads();
+  buildOverlay(); buildGhost(); rebuildGrid();
+}
+
+// ========== Picking ==========
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+
+function setNdcFromEvent(e) {
+  const rect = canvas.getBoundingClientRect();
+  ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+}
+function pickInteractive() {
+  const candidates = [];
+  for (const child of padGroup.children) candidates.push(child);
+  for (const child of fpcGroup.children) candidates.push(child);
+  for (const subgroup of traceGroup.children) {
+    if (subgroup.isGroup) for (const c of subgroup.children) candidates.push(c);
+    else candidates.push(subgroup);
+  }
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(candidates, false);
+  if (!hits.length) return null;
+  const order = { waypoint: 0, pad: 1, fpc: 2, trace: 3 };
+  hits.sort((a, b) => {
+    const ka = a.object.userData?.kind, kb = b.object.userData?.kind;
+    const da = (order[ka] ?? 99), db = (order[kb] ?? 99);
+    if (da !== db) return da - db;
+    return a.distance - b.distance;
+  });
+  return hits[0].object.userData;
+}
+function pickGroundXY() {
+  raycaster.setFromCamera(ndc, camera);
+  const planeZ = layerZTop('sensor');
+  const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ);
+  const hit = new THREE.Vector3();
+  if (raycaster.ray.intersectPlane(plane, hit)) return [hit.x, hit.y];
+  return null;
+}
+function snap(v) { if (!State.snapEnabled) return v; const s = State.snapSize; return Math.round(v / s) * s; }
+function snapPt(p) { return [snap(p[0]), snap(p[1])]; }
+
+// ========== Ortho helpers ==========
+function orthoProject(fromPt, toPt) {
+  // Returns toPt projected so that the segment fromPt→toPt is axis-aligned.
+  // Choose the axis with larger displacement.
+  const dx = Math.abs(toPt[0] - fromPt[0]);
+  const dy = Math.abs(toPt[1] - fromPt[1]);
+  if (dx >= dy) return [toPt[0], fromPt[1]]; // horizontal segment
+  return [fromPt[0], toPt[1]];               // vertical segment
+}
+function orthoLBend(fromPt, toPt) {
+  // Returns an intermediate waypoint to make from→bend→to two axis-aligned segments
+  // Heuristic: corner along (to.x, from.y) — horizontal first, then vertical
+  return [toPt[0], fromPt[1]];
+}
+
+// ========== Mouse handlers ==========
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+canvas.addEventListener('mousemove', (e) => {
+  setNdcFromEvent(e);
+  const xy = pickGroundXY();
+  if (xy) document.getElementById('cursorInfo').textContent = `x: ${xy[0].toFixed(2)} mm   y: ${xy[1].toFixed(2)} mm`;
+
+  // Placing ghost: track cursor
+  if (State.placing && xy) {
+    State.placing.cursorXY = snapPt(xy);
+    buildGhost();
+    return;
+  }
+
+  // Marquee drag
+  if (State.marquee) {
+    const rect = canvas.getBoundingClientRect();
+    State.marquee.x1 = e.clientX - rect.left;
+    State.marquee.y1 = e.clientY - rect.top;
+    updateMarqueeDom();
+    return;
+  }
+
+  if (State.drag) { handleDragMove(xy); return; }
+
+  if (State.traceDraft) {
+    if (xy) {
+      let cur = snapPt(xy);
+      if (State.orthoMode) {
+        const fromPad = State.model.pads.find(p => p.id === State.traceDraft.fromPadId);
+        const last = State.traceDraft.waypoints.length
+          ? State.traceDraft.waypoints[State.traceDraft.waypoints.length - 1]
+          : (fromPad ? [fromPad.x, fromPad.y] : [0,0]);
+        cur = orthoProject(last, cur);
+      }
+      State.traceDraft.cursor = cur;
+    } else {
+      State.traceDraft.cursor = null;
+    }
+    buildOverlay();
+    return;
+  }
+
+  // Hover update
+  const hit = pickInteractive();
+  if (hit) {
+    if (hit.kind === 'pad') setHover('pad', hit.id);
+    else if (hit.kind === 'fpc') setHover('fpc', hit.id);
+    else if (hit.kind === 'trace') setHover('trace', hit.id);
+    else if (hit.kind === 'waypoint') setHover('waypoint', `${hit.traceId}:${hit.idx}`);
+    else setHover(null, null);
+  } else setHover(null, null);
+});
+
+function setHover(type, id) {
+  if (State.hover?.type === type && State.hover?.id === id) return;
+  State.hover = type ? { type, id } : null;
+  document.getElementById('hoverInfo').textContent = State.hover ? `${type}: ${id}` : '—';
+  buildPads(); buildTraces(); buildFpcPads();
+}
+
+canvas.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  setNdcFromEvent(e);
+  const hit = pickInteractive();
+  const xy = pickGroundXY();
+
+  // Placing: click drops the items
+  if (State.placing) {
+    finalizePlace();
+    return;
+  }
+
+  switch (State.mode) {
+    case 'select': {
+      if (hit && hit.kind === 'waypoint') {
+        pushHistory();
+        State.drag = { type: 'waypoint', traceId: hit.traceId, idx: hit.idx };
+        controls.enabled = false; return;
+      }
+      if (hit && hit.kind === 'pad') {
+        // If shift held, toggle multi-select
+        if (e.shiftKey) {
+          toggleMulti('pads', hit.id);
+        } else {
+          if (multiSelectCount() && State.multiSelect.pads.has(hit.id)) {
+            // Drag entire multi-selection
+            if (xy) {
+              pushHistory();
+              State.drag = { type: 'multi', anchor: xy.slice(), origin: snapshotMultiPositions() };
+              controls.enabled = false;
+            }
+            return;
+          }
+          clearMultiSelect();
+          setSelected('pad', hit.id);
+          if (xy) {
+            const pad = State.model.pads.find(p => p.id === hit.id);
+            pushHistory();
+            State.drag = { type: 'pad', id: hit.id, ox: xy[0] - pad.x, oy: xy[1] - pad.y };
+            controls.enabled = false;
+          }
+        }
+        return;
+      }
+      if (hit && hit.kind === 'fpc') {
+        if (e.shiftKey) toggleMulti('fpcs', hit.id);
+        else { clearMultiSelect(); setSelected('fpc', hit.id); }
+        return;
+      }
+      if (hit && hit.kind === 'trace') {
+        if (e.shiftKey) toggleMulti('traces', hit.id);
+        else { clearMultiSelect(); setSelected('trace', hit.id); }
+        return;
+      }
+      // Empty area → start marquee
+      const rect = canvas.getBoundingClientRect();
+      State.marquee = { x0: e.clientX - rect.left, y0: e.clientY - rect.top,
+                        x1: e.clientX - rect.left, y1: e.clientY - rect.top };
+      controls.enabled = false;
+      updateMarqueeDom();
+      return;
+    }
+    case 'addPad': {
+      if (!xy) { toast('지면 좌표를 잡지 못했습니다 — 카메라 각도를 살짝 바꿔보세요', 'error'); return; }
+      pushHistory();
+      addPadAt(snap(xy[0]), snap(xy[1]));
+      return;
+    }
+    case 'deletePad': {
+      if (!hit) return;
+      pushHistory();
+      if (hit.kind === 'pad') deletePad(hit.id);
+      else if (hit.kind === 'trace') deleteTrace(hit.id);
+      else if (hit.kind === 'fpc') deleteFpc(hit.id);
+      return;
+    }
+    case 'addTrace': {
+      if (hit && hit.kind === 'pad') {
+        if (!State.traceDraft) {
+          State.traceDraft = { fromPadId: hit.id, waypoints: [], cursor: null };
+        } else {
+          finishTraceTo({ kind: 'pad', id: hit.id });
+        }
+      } else if (hit && hit.kind === 'fpc') {
+        if (State.traceDraft) finishTraceTo({ kind: 'fpc', id: hit.id });
+      } else if (xy && State.traceDraft) {
+        let pt = snapPt(xy);
+        if (State.orthoMode) {
+          const fromPad = State.model.pads.find(p => p.id === State.traceDraft.fromPadId);
+          const last = State.traceDraft.waypoints.length
+            ? State.traceDraft.waypoints[State.traceDraft.waypoints.length - 1]
+            : (fromPad ? [fromPad.x, fromPad.y] : [0,0]);
+          pt = orthoProject(last, pt);
+        }
+        State.traceDraft.waypoints.push(pt);
+        buildOverlay();
+      }
+      return;
+    }
+    case 'editTrace': {
+      if (hit && hit.kind === 'waypoint') {
+        pushHistory();
+        State.drag = { type: 'waypoint', traceId: hit.traceId, idx: hit.idx };
+        controls.enabled = false; return;
+      }
+      if (hit && hit.kind === 'trace') {
+        const wasSelected = State.selected?.type === 'trace' && State.selected.id === hit.id;
+        if (!wasSelected) { setSelected('trace', hit.id); }
+        else if (xy) {
+          const t = State.model.traces.find(tr => tr.id === hit.id);
+          if (t) { pushHistory(); insertWaypointNear(t, xy); }
+        }
+      } else setSelected(null, null);
+      return;
+    }
+    case 'moveFpc': {
+      if (hit && hit.kind === 'fpc') {
+        setSelected('fpc', hit.id);
+        if (xy) {
+          const f = State.model.fpcPads.find(x => x.id === hit.id);
+          pushHistory();
+          State.drag = { type: 'fpc', id: hit.id, ox: xy[0] - f.x, oy: xy[1] - f.y };
+          controls.enabled = false;
+        }
+      }
+      return;
+    }
+  }
+});
+
+function endDrag() {
+  if (State.drag) { State.drag = null; controls.enabled = true; refreshSelectionPanel(); refreshLists(); }
+  if (State.marquee) { finalizeMarquee(); State.marquee = null; updateMarqueeDom(); controls.enabled = true; }
+}
+canvas.addEventListener('mouseup', endDrag);
+window.addEventListener('mouseup', endDrag);
+
+function handleDragMove(xy) {
+  if (!xy) return;
+  const sx = snap(xy[0]), sy = snap(xy[1]);
+  if (State.drag.type === 'pad') {
+    const p = State.model.pads.find(p => p.id === State.drag.id); if (!p) return;
+    p.x = +(sx - State.drag.ox).toFixed(3); p.y = +(sy - State.drag.oy).toFixed(3);
+    buildPads(); buildTraces(); return;
+  }
+  if (State.drag.type === 'fpc') {
+    const f = State.model.fpcPads.find(x => x.id === State.drag.id); if (!f) return;
+    f.x = +(sx - State.drag.ox).toFixed(3); f.y = +(sy - State.drag.oy).toFixed(3);
+    buildFpcPads(); buildTraces(); return;
+  }
+  if (State.drag.type === 'waypoint') {
+    const t = State.model.traces.find(t => t.id === State.drag.traceId); if (!t) return;
+    let nx = sx, ny = sy;
+    if (State.orthoMode) {
+      // Snap waypoint to align with previous neighbor on either X or Y
+      const path = traceFullPath(t);
+      const prev = path[State.drag.idx], next = path[State.drag.idx + 2];
+      if (prev) {
+        const dx = Math.abs(nx - prev[0]), dy = Math.abs(ny - prev[1]);
+        if (dx < dy) nx = prev[0]; else ny = prev[1];
+      } else if (next) {
+        const dx = Math.abs(nx - next[0]), dy = Math.abs(ny - next[1]);
+        if (dx < dy) nx = next[0]; else ny = next[1];
+      }
+    }
+    t.waypoints[State.drag.idx] = [+nx.toFixed(3), +ny.toFixed(3)];
+    buildTraces(); return;
+  }
+  if (State.drag.type === 'multi') {
+    const dx = sx - State.drag.anchor[0];
+    const dy = sy - State.drag.anchor[1];
+    const origin = State.drag.origin;
+    for (const id of State.multiSelect.pads) {
+      const p = State.model.pads.find(x => x.id === id); const o = origin.pads[id];
+      if (p && o) { p.x = +(o.x + dx).toFixed(3); p.y = +(o.y + dy).toFixed(3); }
+    }
+    for (const id of State.multiSelect.fpcs) {
+      const f = State.model.fpcPads.find(x => x.id === id); const o = origin.fpcs[id];
+      if (f && o) { f.x = +(o.x + dx).toFixed(3); f.y = +(o.y + dy).toFixed(3); }
+    }
+    for (const id of State.multiSelect.traces) {
+      const t = State.model.traces.find(x => x.id === id); const o = origin.traces[id];
+      if (t && o) t.waypoints = o.waypoints.map(w => [+(w[0]+dx).toFixed(3), +(w[1]+dy).toFixed(3)]);
+    }
+    buildPads(); buildTraces(); buildFpcPads();
+    return;
+  }
+}
+
+function snapshotMultiPositions() {
+  const snap = { pads: {}, fpcs: {}, traces: {} };
+  for (const id of State.multiSelect.pads) { const p = State.model.pads.find(x => x.id === id); if (p) snap.pads[id] = { x: p.x, y: p.y }; }
+  for (const id of State.multiSelect.fpcs) { const f = State.model.fpcPads.find(x => x.id === id); if (f) snap.fpcs[id] = { x: f.x, y: f.y }; }
+  for (const id of State.multiSelect.traces) { const t = State.model.traces.find(x => x.id === id); if (t) snap.traces[id] = { waypoints: t.waypoints.map(w => [w[0], w[1]]) }; }
+  return snap;
+}
+
+function toggleMulti(kind, id) {
+  const set = State.multiSelect[kind];
+  if (set.has(id)) set.delete(id); else set.add(id);
+  // Clear single-selected if it's now in multi
+  State.selected = null;
+  refreshSelectionPanel(); refreshLists();
+  buildPads(); buildTraces(); buildFpcPads();
+  if (typeof updateCapButton === 'function') updateCapButton();
+}
+
+// ========== Marquee selection ==========
+function updateMarqueeDom() {
+  const dom = document.getElementById('marqueeOverlay');
+  if (!State.marquee) { dom.style.display = 'none'; return; }
+  const x = Math.min(State.marquee.x0, State.marquee.x1);
+  const y = Math.min(State.marquee.y0, State.marquee.y1);
+  const w = Math.abs(State.marquee.x1 - State.marquee.x0);
+  const h = Math.abs(State.marquee.y1 - State.marquee.y0);
+  dom.style.left = x + 'px'; dom.style.top = y + 'px';
+  dom.style.width = w + 'px'; dom.style.height = h + 'px';
+  dom.style.display = 'block';
+}
+function finalizeMarquee() {
+  // Convert two screen corners to world XY by raycasting through each
+  const rect = canvas.getBoundingClientRect();
+  const corners = [
+    [State.marquee.x0, State.marquee.y0],
+    [State.marquee.x1, State.marquee.y1],
+    [State.marquee.x0, State.marquee.y1],
+    [State.marquee.x1, State.marquee.y0],
+  ].map(([sx, sy]) => {
+    ndc.x = ((sx) / rect.width) * 2 - 1;
+    ndc.y = -((sy) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(ndc, camera);
+    const planeZ = layerZTop('sensor');
+    const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ);
+    const hit = new THREE.Vector3();
+    return raycaster.ray.intersectPlane(plane, hit) ? [hit.x, hit.y] : null;
+  });
+  if (corners.some(c => c === null)) { toast('마퀴 영역을 지면에 투영하지 못했습니다', 'error'); return; }
+  const xs = corners.map(c => c[0]); const ys = corners.map(c => c[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  // Selection threshold (treat tiny marquee as cancel)
+  const screenW = Math.abs(State.marquee.x1 - State.marquee.x0);
+  const screenH = Math.abs(State.marquee.y1 - State.marquee.y0);
+  if (screenW < 5 && screenH < 5) {
+    // it's basically a click on empty area — clear selection
+    setSelected(null, null); clearMultiSelect();
+    refreshSelectionPanel(); refreshLists();
+    buildPads(); buildTraces(); buildFpcPads();
+    return;
+  }
+  const inBox = (x, y) => x >= minX && x <= maxX && y >= minY && y <= maxY;
+  clearMultiSelect();
+  for (const p of State.model.pads)    if (inBox(p.x, p.y)) State.multiSelect.pads.add(p.id);
+  for (const f of State.model.fpcPads) if (inBox(f.x, f.y)) State.multiSelect.fpcs.add(f.id);
+  for (const t of State.model.traces) {
+    const path = traceFullPath(t);
+    if (path.some(([x, y]) => inBox(x, y))) State.multiSelect.traces.add(t.id);
+  }
+  State.selected = null;
+  refreshSelectionPanel(); refreshLists();
+  buildPads(); buildTraces(); buildFpcPads();
+  const total = multiSelectCount();
+  if (total) toast(`다중 선택: 패드 ${State.multiSelect.pads.size} · 트레이스 ${State.multiSelect.traces.size} · FPC ${State.multiSelect.fpcs.size}`, 'ok');
+  if (typeof updateCapButton === 'function') updateCapButton();
+}
+
+// ========== History (Undo/Redo) ==========
+const History = {
+  undo: [], redo: [], limit: 80,
+  push() {
+    this.undo.push(JSON.stringify(State.model));
+    if (this.undo.length > this.limit) this.undo.shift();
+    this.redo.length = 0;
+    updateHistoryButtons();
+  },
+  doUndo() {
+    if (!this.undo.length) return;
+    this.redo.push(JSON.stringify(State.model));
+    State.model = JSON.parse(this.undo.pop());
+    afterHistory();
+  },
+  doRedo() {
+    if (!this.redo.length) return;
+    this.undo.push(JSON.stringify(State.model));
+    State.model = JSON.parse(this.redo.pop());
+    afterHistory();
+  },
+  clear() { this.undo.length = 0; this.redo.length = 0; updateHistoryButtons(); },
+};
+function pushHistory() { History.push(); }
+function afterHistory() {
+  setSelected(null, null); clearMultiSelect();
+  syncGlassInputs(); refreshLayerList();
+  rebuildAll(); refreshLists(); refreshStatus();
+  updateHistoryButtons();
+}
+function updateHistoryButtons() {
+  document.getElementById('btnUndo').disabled = History.undo.length === 0;
+  document.getElementById('btnRedo').disabled = History.redo.length === 0;
+}
+
+// ========== Operations ==========
+function uid(prefix, list) {
+  let n = list.length + 1;
+  while (list.find(x => x.id === `${prefix}${n}`)) n++;
+  return `${prefix}${n}`;
+}
+function addPadAt(x, y) {
+  const padDia = +document.getElementById('presetDia').value || 6;
+  const id = uid('P', State.model.pads);
+  State.model.pads.push({ id, x, y, shape: 'circle', size: padDia, size2: padDia });
+  buildPads(); refreshLists(); refreshStatus();
+  toast(`패드 ${id} 추가 (${x.toFixed(1)}, ${y.toFixed(1)})`, 'ok');
+  setSelected('pad', id);
+}
+function deletePad(id) {
+  State.model.pads = State.model.pads.filter(p => p.id !== id);
+  State.model.traces = State.model.traces.filter(t => t.from !== id && t.to !== id);
+  if (State.selected?.type === 'pad' && State.selected.id === id) setSelected(null, null);
+  rebuildAll(); refreshLists(); refreshStatus();
+  toast(`패드 ${id} 삭제됨`, 'ok');
+}
+function deleteTrace(id) {
+  State.model.traces = State.model.traces.filter(t => t.id !== id);
+  if (State.selected?.type === 'trace' && State.selected.id === id) setSelected(null, null);
+  buildTraces(); refreshLists(); refreshStatus();
+  toast(`트레이스 ${id} 삭제됨`, 'ok');
+}
+function deleteFpc(id) {
+  State.model.fpcPads = State.model.fpcPads.filter(f => f.id !== id);
+  State.model.traces = State.model.traces.filter(t => t.from !== id && t.to !== id);
+  if (State.selected?.type === 'fpc' && State.selected.id === id) setSelected(null, null);
+  buildFpcPads(); buildTraces(); refreshLists(); refreshStatus();
+  toast(`FPC ${id} 삭제됨`, 'ok');
+}
+
+function finishTraceTo(target) {
+  if (!State.traceDraft) return;
+  if (target.kind === 'pad' && target.id === State.traceDraft.fromPadId) {
+    toast('출발 패드와 동일 — 취소됨', 'error');
+    State.traceDraft = null; buildOverlay(); return;
+  }
+  pushHistory();
+  // Build waypoints (with optional ortho L-bend before the target)
+  const wp = State.traceDraft.waypoints.slice();
+  if (State.orthoMode) {
+    const fromPad = State.model.pads.find(p => p.id === State.traceDraft.fromPadId);
+    const targetPt = (() => {
+      if (target.kind === 'pad') { const p = State.model.pads.find(x => x.id === target.id); return p ? [p.x, p.y] : null; }
+      if (target.kind === 'fpc') { const f = State.model.fpcPads.find(x => x.id === target.id); return f ? [f.x, f.y] : null; }
+      return null;
+    })();
+    if (targetPt) {
+      const last = wp.length ? wp[wp.length - 1] : (fromPad ? [fromPad.x, fromPad.y] : [0,0]);
+      // If last and target are not axis-aligned, add an L-bend
+      if (Math.abs(last[0] - targetPt[0]) > 1e-6 && Math.abs(last[1] - targetPt[1]) > 1e-6) {
+        wp.push(orthoLBend(last, targetPt));
+      }
+    }
+  }
+  const id = uid('T', State.model.traces);
+  State.model.traces.push({ id, from: State.traceDraft.fromPadId, to: target.id, width: 0.4, waypoints: wp });
+  State.traceDraft = null;
+  buildTraces(); buildOverlay(); refreshLists(); refreshStatus();
+  toast(`트레이스 ${id} 추가 (→ ${target.id})`, 'ok');
+  setSelected('trace', id);
+}
+function cancelTrace() {
+  if (State.traceDraft) { State.traceDraft = null; buildOverlay(); toast('트레이스 그리기 취소', 'error'); }
+}
+function insertWaypointNear(trace, xy) {
+  const path = traceFullPath(trace);
+  let bestI = 0, bestD = Infinity;
+  for (let i = 0; i < path.length - 1; i++) {
+    const [ax, ay] = path[i], [bx, by] = path[i + 1];
+    const d = pointSegDist(xy[0], xy[1], ax, ay, bx, by);
+    if (d < bestD) { bestD = d; bestI = i; }
+  }
+  let pt = [+snap(xy[0]).toFixed(3), +snap(xy[1]).toFixed(3)];
+  trace.waypoints.splice(bestI, 0, pt);
+  buildTraces(); refreshSelectionPanel();
+  toast(`웨이포인트 추가 (segment ${bestI})`, 'ok');
+}
+function pointSegDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx*dx + dy*dy;
+  if (len2 < 1e-9) return Math.hypot(px - ax, py - ay);
+  let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * dx, cy = ay + t * dy;
+  return Math.hypot(px - cx, py - cy);
+}
+
+// ========== Selection ==========
+function setSelected(type, id) {
+  if (type) clearMultiSelect();
+  State.selected = type ? { type, id } : null;
+  refreshSelectionPanel(); refreshLists();
+  buildPads(); buildTraces(); buildFpcPads();
+  if (typeof updateCapButton === 'function') updateCapButton();
+}
+
+// ========== Copy / Paste / Place ==========
+function gatherSelectionForCopy() {
+  // Returns Sets of pad/fpc/trace ids that should be copied
+  const padIds = new Set(), fpcIds = new Set(), traceIds = new Set();
+  if (State.selected) {
+    if (State.selected.type === 'pad')   padIds.add(State.selected.id);
+    if (State.selected.type === 'fpc')   fpcIds.add(State.selected.id);
+    if (State.selected.type === 'trace') traceIds.add(State.selected.id);
+  }
+  for (const id of State.multiSelect.pads)   padIds.add(id);
+  for (const id of State.multiSelect.fpcs)   fpcIds.add(id);
+  for (const id of State.multiSelect.traces) traceIds.add(id);
+
+  // Auto-include endpoint anchors of every selected trace
+  for (const tid of traceIds) {
+    const t = State.model.traces.find(x => x.id === tid); if (!t) continue;
+    if (State.model.pads.find(p => p.id === t.from)) padIds.add(t.from);
+    if (State.model.pads.find(p => p.id === t.to))   padIds.add(t.to);
+    if (State.model.fpcPads.find(f => f.id === t.from)) fpcIds.add(t.from);
+    if (State.model.fpcPads.find(f => f.id === t.to))   fpcIds.add(t.to);
+  }
+  return { padIds, fpcIds, traceIds };
+}
+
+function startPlaceFromSelection() {
+  const { padIds, fpcIds, traceIds } = gatherSelectionForCopy();
+  if (padIds.size + fpcIds.size + traceIds.size === 0) {
+    toast('복사할 항목이 없습니다 — 먼저 선택하세요', 'error'); return;
+  }
+  // Compute centroid
+  const allPts = [];
+  for (const id of padIds) { const p = State.model.pads.find(x => x.id === id); if (p) allPts.push([p.x, p.y]); }
+  for (const id of fpcIds) { const f = State.model.fpcPads.find(x => x.id === id); if (f) allPts.push([f.x, f.y]); }
+  for (const id of traceIds) {
+    const t = State.model.traces.find(x => x.id === id); if (!t) continue;
+    for (const w of t.waypoints) allPts.push([w[0], w[1]]);
+  }
+  const cx = allPts.reduce((a, [x]) => a + x, 0) / allPts.length;
+  const cy = allPts.reduce((a, [, y]) => a + y, 0) / allPts.length;
+
+  const items = { pads: [], fpcs: [], traces: [] };
+  for (const id of padIds) {
+    const p = State.model.pads.find(x => x.id === id);
+    if (p) items.pads.push({ origId: p.id, relx: p.x - cx, rely: p.y - cy,
+      shape: p.shape, size: p.size, size2: p.size2 });
+  }
+  for (const id of fpcIds) {
+    const f = State.model.fpcPads.find(x => x.id === id);
+    if (f) items.fpcs.push({ origId: f.id, relx: f.x - cx, rely: f.y - cy,
+      width: f.width, height: f.height });
+  }
+  // Remap from/to: only keep traces whose endpoints are both in copy set
+  for (const id of traceIds) {
+    const t = State.model.traces.find(x => x.id === id); if (!t) continue;
+    const fromInPads = padIds.has(t.from), fromInFpcs = fpcIds.has(t.from);
+    const toInPads = padIds.has(t.to),     toInFpcs = fpcIds.has(t.to);
+    if (!(fromInPads || fromInFpcs) || !(toInPads || toInFpcs)) {
+      // We auto-included anchors above, so this shouldn't happen
+      continue;
+    }
+    // Build polyline for ghost (endpoint coords + waypoints), all relative
+    const pts = [];
+    const fromObj = fromInPads ? State.model.pads.find(p => p.id === t.from) : State.model.fpcPads.find(p => p.id === t.from);
+    const toObj   = toInPads   ? State.model.pads.find(p => p.id === t.to)   : State.model.fpcPads.find(p => p.id === t.to);
+    pts.push([fromObj.x - cx, fromObj.y - cy]);
+    for (const w of t.waypoints) pts.push([w[0] - cx, w[1] - cy]);
+    pts.push([toObj.x - cx, toObj.y - cy]);
+    items.traces.push({ origId: t.id, fromOrig: t.from, toOrig: t.to, width: t.width,
+      points: pts, waypointsRel: t.waypoints.map(w => [w[0] - cx, w[1] - cy]) });
+  }
+
+  State.placing = { items, cursorXY: [0, 0], mirrored: false };
+  document.body.classList.add('placing');
+  document.getElementById('placingInfo').style.display = 'inline-block';
+  buildGhost();
+  toast(`배치 모드 — 클릭=드롭, R=좌우반전, Esc=취소`, 'ok');
+}
+
+function finalizePlace() {
+  if (!State.placing) return;
+  pushHistory();
+  const { items, cursorXY, mirrored } = State.placing;
+  const flip = mirrored ? -1 : 1;
+  const [cx, cy] = cursorXY;
+  // ID remap: original id → new id
+  const remap = {};
+  for (const p of items.pads) {
+    const newId = uid('P', State.model.pads);
+    remap[p.origId] = newId;
+    State.model.pads.push({
+      id: newId,
+      x: +(cx + p.relx * flip).toFixed(3),
+      y: +(cy + p.rely).toFixed(3),
+      shape: p.shape,
+      // For ellipse with mirroring, swap rx/ry doesn't apply — pure x mirror keeps shape symmetric for circles/squares.
+      size: p.size, size2: p.size2,
+    });
+  }
+  for (const f of items.fpcs) {
+    const newId = uid('F', State.model.fpcPads);
+    remap[f.origId] = newId;
+    State.model.fpcPads.push({
+      id: newId,
+      x: +(cx + f.relx * flip).toFixed(3),
+      y: +(cy + f.rely).toFixed(3),
+      width: f.width, height: f.height,
+    });
+  }
+  for (const t of items.traces) {
+    const fromNew = remap[t.fromOrig], toNew = remap[t.toOrig];
+    if (!fromNew || !toNew) continue;
+    const newId = uid('T', State.model.traces);
+    State.model.traces.push({
+      id: newId, from: fromNew, to: toNew, width: t.width,
+      waypoints: t.waypointsRel.map(w => [+(cx + w[0] * flip).toFixed(3), +(cy + w[1]).toFixed(3)]),
+    });
+  }
+  toast(`배치 완료: 패드 ${items.pads.length}·트레이스 ${items.traces.length}·FPC ${items.fpcs.length}`, 'ok');
+  rebuildAll(); refreshLists(); refreshStatus();
+  // Continue placing — let user drop multiple copies. Press Esc to exit.
+  buildGhost();
+}
+
+function cancelPlace() {
+  if (!State.placing) return;
+  State.placing = null;
+  document.body.classList.remove('placing');
+  document.getElementById('placingInfo').style.display = 'none';
+  clearGroup(ghostGroup);
+  toast('배치 취소', 'error');
+}
+
+// ========== UI panels ==========
+const $ = id => document.getElementById(id);
+const modeButtons = document.querySelectorAll('#leftPanel .modeBtns button');
+modeButtons.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
+function setMode(mode) {
+  cancelTrace(); cancelPlace();
+  State.mode = mode;
+  modeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  document.body.classList.remove('mode-select','mode-addPad','mode-deletePad','mode-addTrace','mode-editTrace','mode-moveFpc');
+  document.body.classList.add('mode-' + mode);
+  const hints = {
+    select: '좌클릭=선택, 드래그=이동, 빈 공간 드래그=마퀴 다중선택, Shift+클릭=다중선택 토글',
+    addPad: '캔버스를 좌클릭하면 패드가 추가됩니다 (커서가 + 모양)',
+    deletePad: '패드/트레이스/FPC를 클릭하면 삭제됩니다',
+    addTrace: '시작 패드 → 빈 곳(웨이포인트) → 끝 패드/FPC. 직각 모드 켜면 ⌐자 자동',
+    editTrace: '트레이스 선택 후 라인을 클릭하면 웨이포인트 추가, 핸들 드래그로 이동',
+    moveFpc: 'FPC 패드를 드래그하여 이동',
+  };
+  $('modeHint').textContent = hints[mode] || '';
+}
+
+function refreshSelectionPanel() {
+  const panel = $('selectionPanel');
+  const total = multiSelectCount();
+  if (total > 0) {
+    panel.innerHTML = `
+      <div class="row"><label>다중 선택</label><span class="badge">${total}개</span></div>
+      <div class="small">패드 ${State.multiSelect.pads.size} · 트레이스 ${State.multiSelect.traces.size} · FPC ${State.multiSelect.fpcs.size}</div>
+      <div class="row" style="margin-top:8px">
+        <button id="btnCopySel" class="primary" style="flex:1">⎘ 복사·배치 (Ctrl+D)</button>
+        <button id="btnDelMulti" class="danger">삭제</button>
+      </div>
+      <div class="small">선택 항목 통째로 드래그해서 옮기거나, 복사 후 R로 좌우반전 가능</div>
+    `;
+    $('btnCopySel').addEventListener('click', startPlaceFromSelection);
+    $('btnDelMulti').addEventListener('click', () => {
+      pushHistory();
+      for (const id of [...State.multiSelect.traces]) deleteTrace(id);
+      for (const id of [...State.multiSelect.pads])   deletePad(id);
+      for (const id of [...State.multiSelect.fpcs])   deleteFpc(id);
+      clearMultiSelect();
+      refreshSelectionPanel(); refreshLists();
+    });
+    return;
+  }
+  if (!State.selected) { panel.innerHTML = '<div class="empty">선택된 항목 없음</div>'; return; }
+  const { type, id } = State.selected;
+  if (type === 'pad') {
+    const p = State.model.pads.find(x => x.id === id); if (!p) { panel.innerHTML = ''; return; }
+    panel.innerHTML = `
+      <div class="row"><label>ID</label><input type="text" value="${p.id}" data-bind="pad.id" style="width:100px"></div>
+      <div class="row"><label>모양</label>
+        <select data-bind="pad.shape" style="width:120px">
+          <option value="circle"${p.shape==='circle'?' selected':''}>원 (circle)</option>
+          <option value="square"${p.shape==='square'?' selected':''}>사각 (square)</option>
+          <option value="ellipse"${p.shape==='ellipse'?' selected':''}>타원 (ellipse)</option>
+          <option value="roundedSquare"${p.shape==='roundedSquare'?' selected':''}>둥근 사각</option>
+        </select>
+      </div>
+      <div class="row"><label>X (mm)</label><input type="number" value="${p.x}" step="0.1" data-bind="pad.x"></div>
+      <div class="row"><label>Y (mm)</label><input type="number" value="${p.y}" step="0.1" data-bind="pad.y"></div>
+      <div class="row"><label>크기 (mm)</label><input type="number" value="${p.size}" step="0.1" min="0.1" data-bind="pad.size"></div>
+      <div class="row"><label>${p.shape==='ellipse' ? 'Y지름' : (p.shape==='roundedSquare' ? '코너 R' : '보조')} (mm)</label>
+        <input type="number" value="${p.size2}" step="0.1" min="0" data-bind="pad.size2" ${p.shape==='circle'||p.shape==='square'?'disabled':''}></div>
+      <div class="row"><button id="btnCopySel" class="primary" style="flex:1">⎘ 복사·배치</button>
+      <button class="danger" id="btnDelSel">삭제</button></div>`;
+  } else if (type === 'trace') {
+    const t = State.model.traces.find(x => x.id === id); if (!t) { panel.innerHTML = ''; return; }
+    panel.innerHTML = `
+      <div class="row"><label>ID</label><input type="text" value="${t.id}" data-bind="trace.id" style="width:100px"></div>
+      <div class="row"><label>From</label>${selectPadOpts(t.from, 'trace.from')}</div>
+      <div class="row"><label>To</label>${selectPadOrFpcOpts(t.to, 'trace.to')}</div>
+      <div class="row"><label>폭 (mm)</label><input type="number" value="${t.width}" step="0.05" min="0.05" data-bind="trace.width"></div>
+      <div class="small">웨이포인트 ${t.waypoints.length}개</div>
+      <div id="wpList" class="listScroll" style="max-height:120px"></div>
+      <div class="row" style="margin-top:6px">
+        <button id="btnSimplifyTrace">중복점 정리</button>
+        <button id="btnReverseTrace">방향 반전</button>
+      </div>
+      <div class="row"><button id="btnCopySel" class="primary" style="flex:1">⎘ 복사·배치</button>
+      <button class="danger" id="btnDelSel">삭제</button></div>`;
+    const wpList = $('wpList');
+    wpList.innerHTML = t.waypoints.map((wp, i) =>
+      `<div class="listItem" data-wp="${i}">
+         <span>w${i}: (${wp[0].toFixed(2)}, ${wp[1].toFixed(2)})</span>
+         <span><button class="btn" data-wp-del="${i}" style="padding:2px 6px">×</button></span>
+       </div>`).join('') || '<div class="empty">웨이포인트 없음</div>';
+    wpList.querySelectorAll('[data-wp-del]').forEach(b => b.addEventListener('click', e => {
+      e.stopPropagation();
+      pushHistory();
+      const i = +b.dataset.wpDel; t.waypoints.splice(i, 1);
+      buildTraces(); refreshSelectionPanel();
+    }));
+    $('btnSimplifyTrace')?.addEventListener('click', () => {
+      pushHistory();
+      t.waypoints = t.waypoints.filter((wp, i, a) => i === 0 || Math.hypot(wp[0]-a[i-1][0], wp[1]-a[i-1][1]) > 0.01);
+      buildTraces(); refreshSelectionPanel();
+    });
+    $('btnReverseTrace')?.addEventListener('click', () => {
+      pushHistory();
+      [t.from, t.to] = [t.to, t.from]; t.waypoints.reverse();
+      buildTraces(); refreshSelectionPanel();
+    });
+  } else if (type === 'fpc') {
+    const f = State.model.fpcPads.find(x => x.id === id); if (!f) { panel.innerHTML = ''; return; }
+    panel.innerHTML = `
+      <div class="row"><label>ID</label><input type="text" value="${f.id}" data-bind="fpc.id" style="width:100px"></div>
+      <div class="row"><label>X (mm)</label><input type="number" value="${f.x}" step="0.1" data-bind="fpc.x"></div>
+      <div class="row"><label>Y (mm)</label><input type="number" value="${f.y}" step="0.1" data-bind="fpc.y"></div>
+      <div class="row"><label>폭 (mm)</label><input type="number" value="${f.width}" step="0.1" min="0.05" data-bind="fpc.width"></div>
+      <div class="row"><label>높이 (mm)</label><input type="number" value="${f.height}" step="0.1" min="0.05" data-bind="fpc.height"></div>
+      <div class="row"><button id="btnCopySel" class="primary" style="flex:1">⎘ 복사·배치</button>
+      <button class="danger" id="btnDelSel">삭제</button></div>`;
+  }
+  panel.querySelectorAll('[data-bind]').forEach(inp => {
+    inp.addEventListener('change', () => { pushHistory(); applyBind(inp); });
+  });
+  $('btnDelSel')?.addEventListener('click', () => {
+    if (!State.selected) return;
+    pushHistory();
+    const { type, id } = State.selected;
+    if (type === 'pad') deletePad(id);
+    else if (type === 'trace') deleteTrace(id);
+    else if (type === 'fpc') deleteFpc(id);
+  });
+  $('btnCopySel')?.addEventListener('click', startPlaceFromSelection);
+}
+function selectPadOpts(value, bind) {
+  const opts = State.model.pads.map(p =>
+    `<option value="${p.id}"${p.id===value?' selected':''}>${p.id}</option>`).join('');
+  return `<select data-bind="${bind}" style="width:100px">${opts}</select>`;
+}
+function selectPadOrFpcOpts(value, bind) {
+  const pads = State.model.pads.map(p =>
+    `<option value="${p.id}"${p.id===value?' selected':''}>${p.id} (pad)</option>`).join('');
+  const fpcs = State.model.fpcPads.map(f =>
+    `<option value="${f.id}"${f.id===value?' selected':''}>${f.id} (fpc)</option>`).join('');
+  return `<select data-bind="${bind}" style="width:120px">${pads}${fpcs}</select>`;
+}
+function applyBind(inp) {
+  const path = inp.dataset.bind;
+  const [type, key] = path.split('.');
+  if (!State.selected) return;
+  const id = State.selected.id;
+  let obj;
+  if (type === 'pad') obj = State.model.pads.find(p => p.id === id);
+  else if (type === 'trace') obj = State.model.traces.find(t => t.id === id);
+  else if (type === 'fpc') obj = State.model.fpcPads.find(f => f.id === id);
+  if (!obj) return;
+  let v = inp.value;
+  if (inp.type === 'number') v = parseFloat(v);
+  if (key === 'id') {
+    const collection = type === 'pad' ? State.model.pads : type === 'trace' ? State.model.traces : State.model.fpcPads;
+    if (collection.some(x => x !== obj && x.id === v)) {
+      toast(`ID 중복: ${v}`, 'error'); inp.value = obj.id; return;
+    }
+    if (type === 'pad' || type === 'fpc') {
+      for (const t of State.model.traces) { if (t.from === obj.id) t.from = v; if (t.to === obj.id) t.to = v; }
+    }
+  }
+  obj[key] = v;
+  if (key === 'shape') {
+    if (v === 'circle' || v === 'square') obj.size2 = obj.size;
+    else if (v === 'roundedSquare') obj.size2 = obj.size * 0.2;
+    else if (v === 'ellipse') obj.size2 = obj.size;
+  }
+  if (type === 'pad') buildPads();
+  else if (type === 'fpc') buildFpcPads();
+  buildTraces();
+  refreshLists(); refreshStatus(); refreshSelectionPanel();
+}
+function refreshLists() {
+  const padList = $('padList');
+  if (!State.model.pads.length) padList.innerHTML = '<div class="empty">패드 없음</div>';
+  else padList.innerHTML = State.model.pads.map(p => `
+    <div class="listItem ${isSelected('pad', p.id)?'selected':''}" data-pad="${p.id}">
+      <span>${p.id} <span class="meta">${p.shape}</span></span>
+      <span class="meta">(${p.x.toFixed(1)}, ${p.y.toFixed(1)})</span>
+    </div>`).join('');
+  padList.querySelectorAll('[data-pad]').forEach(el =>
+    el.addEventListener('click', () => setSelected('pad', el.dataset.pad)));
+  $('padCount').textContent = `(${State.model.pads.length})`;
+
+  const traceList = $('traceList');
+  if (!State.model.traces.length) traceList.innerHTML = '<div class="empty">트레이스 없음</div>';
+  else traceList.innerHTML = State.model.traces.map(t => `
+    <div class="listItem ${isSelected('trace', t.id)?'selected':''}" data-trace="${t.id}">
+      <span>${t.id} <span class="meta">${t.from} → ${t.to}</span></span>
+      <span class="meta">w=${t.waypoints.length}</span>
+    </div>`).join('');
+  traceList.querySelectorAll('[data-trace]').forEach(el =>
+    el.addEventListener('click', () => setSelected('trace', el.dataset.trace)));
+  $('traceCount').textContent = `(${State.model.traces.length})`;
+
+  const fpcList = $('fpcList');
+  if (!State.model.fpcPads.length) fpcList.innerHTML = '<div class="empty">FPC 패드 없음</div>';
+  else fpcList.innerHTML = State.model.fpcPads.map(f => `
+    <div class="listItem ${isSelected('fpc', f.id)?'selected':''}" data-fpc="${f.id}">
+      <span>${f.id}</span>
+      <span class="meta">(${f.x.toFixed(1)}, ${f.y.toFixed(1)})</span>
+    </div>`).join('');
+  fpcList.querySelectorAll('[data-fpc]').forEach(el =>
+    el.addEventListener('click', () => setSelected('fpc', el.dataset.fpc)));
+}
+function refreshStatus() {
+  $('statusInfo').textContent =
+    `패드: ${State.model.pads.length} · 트레이스: ${State.model.traces.length} · FPC: ${State.model.fpcPads.length}`;
+}
+function refreshLayerList() {
+  const ll = $('layerList');
+  const glass = State.model.glass;
+  let html = `<div class="layerRow">
+    <input type="checkbox" data-layer="glass" ${glass.visible!==false?'checked':''}>
+    <span class="name">Glass (${glass.thickness}mm)</span>
+    <span class="thick">${glass.thickness} mm</span>
+    <input type="color" data-layer-color="glass" value="${glass.color}">
+  </div>`;
+  for (const l of State.model.layers) {
+    html += `<div class="layerRow">
+      <input type="checkbox" data-layer="${l.id}" ${l.visible?'checked':''}>
+      <span class="name">${l.name}</span>
+      <span class="thick">${l.thickness} mm</span>
+      <input type="color" data-layer-color="${l.id}" value="${l.color}">
+    </div>`;
+  }
+  ll.innerHTML = html;
+  ll.querySelectorAll('[data-layer]').forEach(cb => cb.addEventListener('change', () => {
+    pushHistory();
+    const id = cb.dataset.layer;
+    if (id === 'glass') State.model.glass.visible = cb.checked;
+    else getLayer(id).visible = cb.checked;
+    rebuildAll();
+  }));
+  ll.querySelectorAll('[data-layer-color]').forEach(c => c.addEventListener('input', () => {
+    const id = c.dataset.layerColor;
+    if (id === 'glass') { State.model.glass.color = c.value; Materials.glass.color.set(c.value); }
+    else { const l = getLayer(id); l.color = c.value; if (Materials[id]) Materials[id].color.set(c.value); }
+  }));
+}
+
+['glassW','glassH','glassT'].forEach(id => $(id).addEventListener('change', () => {
+  pushHistory();
+  State.model.glass.width = parseFloat($('glassW').value);
+  State.model.glass.height = parseFloat($('glassH').value);
+  State.model.glass.thickness = parseFloat($('glassT').value);
+  rebuildAll();
+}));
+function syncGlassInputs() {
+  $('glassW').value = State.model.glass.width;
+  $('glassH').value = State.model.glass.height;
+  $('glassT').value = State.model.glass.thickness;
+}
+
+$('snapToggle').addEventListener('change', e => State.snapEnabled = e.target.checked);
+$('snapSize').addEventListener('change', e => State.snapSize = parseFloat(e.target.value) || 0.5);
+$('gridToggle').addEventListener('change', e => { State.showGrid = e.target.checked; rebuildGrid(); });
+
+$('btnApplyGrid').addEventListener('click', () => {
+  openConfirm('패드 그리드 재생성', '기존 패드/트레이스/FPC가 모두 새로 만들어집니다. 진행할까요?', () => {
+    pushHistory();
+    const cols = parseInt($('presetCols').value);
+    const rows = parseInt($('presetRows').value);
+    const dia = parseFloat($('presetDia').value);
+    const pitch = parseFloat($('presetPitch').value);
+    State.model = generateGrid(cols, rows, dia, pitch);
+    setSelected(null, null); clearMultiSelect();
+    rebuildAll(); refreshLists(); refreshStatus(); refreshLayerList(); syncGlassInputs();
+    fitView();
+    toast(`${cols}×${rows} 그리드 생성`, 'ok');
+  });
+});
+
+$('btnNew').addEventListener('click', () => {
+  openConfirm('새 모델', '현재 작업 내용을 잃고 새 16-sensor 모델을 만들까요?', () => {
+    pushHistory();
+    State.model = defaultModel();
+    setSelected(null, null); clearMultiSelect();
+    rebuildAll(); refreshLists(); refreshStatus(); refreshLayerList(); syncGlassInputs();
+    fitView();
+    toast('새 모델 생성', 'ok');
+  });
+});
+$('btnLoad').addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0]; if (!file) return;
+  try {
+    const ab = await file.arrayBuffer();
+    pushHistory();
+    await loadGLB(ab);
+    toast(`불러오기 완료: ${file.name}`, 'ok');
+  } catch (err) { console.error(err); toast(`불러오기 실패: ${err.message}`, 'error');
+  } finally { e.target.value = ''; }
+});
+$('btnSave').addEventListener('click', async () => {
+  try {
+    const blob = await exportGLB();
+    const a = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    a.href = url; a.download = `sensor3d_${Date.now()}.glb`; a.click();
+    URL.revokeObjectURL(url);
+    toast('GLB 저장 완료', 'ok');
+  } catch (err) { console.error(err); toast(`저장 실패: ${err.message}`, 'error'); }
+});
+$('btnUndo').addEventListener('click', () => History.doUndo());
+$('btnRedo').addEventListener('click', () => History.doRedo());
+$('btnCopy').addEventListener('click', startPlaceFromSelection);
+$('btnOrtho').addEventListener('click', () => toggleOrtho());
+function toggleOrtho() {
+  State.orthoMode = !State.orthoMode;
+  $('btnOrtho').classList.toggle('active', State.orthoMode);
+  $('orthoInfo').style.display = State.orthoMode ? 'inline-block' : 'none';
+  toast('직각 모드: ' + (State.orthoMode ? 'ON' : 'OFF'), 'ok');
+}
+
+function fitView() {
+  const r = Math.max(State.model.glass.width, State.model.glass.height) * 0.75;
+  const dist = r / Math.tan((camera.fov / 2) * Math.PI / 180) * 1.1;
+  controls.target.set(0, 0, 0);
+  const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
+  camera.position.copy(controls.target).addScaledVector(dir, dist);
+  controls.update();
+}
+function camDist() { return Math.max(State.model.glass.width, State.model.glass.height) * 0.7 / Math.tan((camera.fov/2)*Math.PI/180) * 1.05; }
+$('viewTop').addEventListener('click', () => { controls.target.set(0,0,0); camera.position.set(0,0,camDist()); controls.update(); });
+$('viewIso').addEventListener('click', () => { const d = camDist(); controls.target.set(0,0,0); camera.position.set(d*0.7,-d*0.7,d*0.6); controls.update(); });
+$('viewFront').addEventListener('click', () => { controls.target.set(0,0,0); camera.position.set(0,-camDist(),0); controls.update(); });
+$('viewSide').addEventListener('click', () => { controls.target.set(0,0,0); camera.position.set(camDist(),0,0); controls.update(); });
+$('viewFit').addEventListener('click', fitView);
+
+window.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); History.doUndo(); return; }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); History.doRedo(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); History.doRedo(); return; }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); startPlaceFromSelection(); return; }
+  if ((e.key === 'r' || e.key === 'R') && State.placing) { e.preventDefault(); State.placing.mirrored = !State.placing.mirrored; buildGhost(); toast('좌우반전: ' + (State.placing.mirrored ? 'ON' : 'OFF'), 'ok'); return; }
+  if (e.key === 'o' || e.key === 'O') { toggleOrtho(); return; }
+
+  if (e.key === 'Escape') {
+    if (State.placing)    { cancelPlace(); return; }
+    if (State.traceDraft) { cancelTrace(); return; }
+    if (multiSelectCount()) { clearMultiSelect(); refreshSelectionPanel(); refreshLists(); buildPads(); buildTraces(); buildFpcPads(); return; }
+    if (State.selected)   { setSelected(null, null); return; }
+  }
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (multiSelectCount()) {
+      pushHistory();
+      for (const id of [...State.multiSelect.traces]) deleteTrace(id);
+      for (const id of [...State.multiSelect.pads])   deletePad(id);
+      for (const id of [...State.multiSelect.fpcs])   deleteFpc(id);
+      clearMultiSelect();
+      refreshSelectionPanel(); refreshLists();
+      return;
+    }
+    if (State.selected) {
+      pushHistory();
+      const { type, id } = State.selected;
+      if (type === 'pad') deletePad(id);
+      else if (type === 'trace') deleteTrace(id);
+      else if (type === 'fpc') deleteFpc(id);
+    }
+  }
+  if (e.key === '1') setMode('select');
+  if (e.key === '2') setMode('addPad');
+  if (e.key === '3') setMode('deletePad');
+  if (e.key === '4') setMode('addTrace');
+  if (e.key === '5') setMode('editTrace');
+  if (e.key === '6') setMode('moveFpc');
+});
+
+const modal = $('confirmModal');
+let confirmCb = null;
+function openConfirm(title, body, cb) {
+  $('confirmTitle').textContent = title; $('confirmBody').textContent = body;
+  confirmCb = cb; modal.classList.add('open');
+}
+$('confirmCancel').addEventListener('click', () => { modal.classList.remove('open'); confirmCb = null; });
+$('confirmOk').addEventListener('click', () => { modal.classList.remove('open'); if (confirmCb) confirmCb(); confirmCb = null; });
+
+let toastTimer = null;
+function toast(msg, kind) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'toast show ' + (kind || '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.classList.remove('show'); }, 1800);
+}
+
+async function exportGLB() {
+  return new Promise((resolve, reject) => {
+    const exportScene = new THREE.Scene();
+    exportScene.userData = { sensorEditor: JSON.parse(JSON.stringify(State.model)) };
+    [layerGroup, padGroup, traceGroup, fpcGroup].forEach(group => {
+      group.traverse(obj => { if (obj.isMesh) { const c = obj.clone(); c.material = obj.material; exportScene.add(c); } });
+    });
+    new GLTFExporter().parse(exportScene,
+      r => resolve(new Blob([r], { type: 'model/gltf-binary' })),
+      e => reject(e), { binary: true, embedImages: true, includeCustomExtensions: true });
+  });
+}
+async function loadGLB(arrayBuffer) {
+  return new Promise((resolve, reject) => {
+    new GLTFLoader().parse(arrayBuffer, '', (gltf) => {
+      const meta = gltf.scene?.userData?.sensorEditor || gltf.userData?.sensorEditor;
+      if (meta && meta.glass && meta.pads && meta.fpcPads) {
+        State.model = sanitizeModel(meta);
+        setSelected(null, null); clearMultiSelect();
+        rebuildAll(); refreshLists(); refreshStatus(); refreshLayerList(); syncGlassInputs(); fitView();
+        resolve();
+      } else reject(new Error('이 GLB에는 sensor-editor 메타데이터가 없습니다 (편집 불가).'));
+    }, err => reject(err));
+  });
+}
+function sanitizeModel(m) {
+  const out = {
+    meta: m.meta || { type: '16Sensor3D', version: '1.0' },
+    glass: Object.assign({ width:50, height:60, thickness:5, color:'#bcdde8', opacity:0.3, visible:true }, m.glass || {}),
+    layers: Array.isArray(m.layers) && m.layers.length ? m.layers.map(l => ({
+      id: l.id, name: l.name || l.id, thickness: +l.thickness || 0.05,
+      color: l.color || '#888888', opacity: l.opacity ?? 1, visible: l.visible !== false,
+    })) : JSON.parse(JSON.stringify(DEFAULT_LAYERS)),
+    pads: (m.pads || []).map(p => ({ id: String(p.id), x: +p.x, y: +p.y,
+      shape: p.shape || 'circle', size: +p.size || 6, size2: +p.size2 || +p.size || 6 })),
+    fpcPads: (m.fpcPads || []).map(f => ({ id: String(f.id), x: +f.x, y: +f.y,
+      width: +f.width || 1, height: +f.height || 4 })),
+    traces: (m.traces || []).map(t => ({ id: String(t.id), from: String(t.from), to: String(t.to),
+      width: +t.width || 0.4, waypoints: (t.waypoints || []).map(w => [+w[0], +w[1]]) })),
+  };
+  if (!out.layers.find(l => l.id === 'sensor'))
+    out.layers.push({ id:'sensor', name:'Sensor / Trace', thickness:0.05, color:'#3a3a3a', opacity:1, visible:true });
+  return out;
+}
+
+// ========== BEM Capacitance ==========
+// BEM (Method of Moments) for mutual capacitance between two traces.
+// Each trace is discretized into rectangular panels at the sensor-layer Z plane.
+// Approach (Maxwell capacitance matrix):
+//   1) Stack panels of trace A then trace B (NA + NB = N).
+//   2) Build potential matrix P (NxN) using analytic square-plate self-term and
+//      centroid-to-centroid 1/(4πε r) for off-diagonals.
+//   3) Solve P·σ = V with V_A=1 V_B=0 → charges; same for V_A=0 V_B=1.
+//   4) Maxwell matrix C_M = [[Q1A,Q2A],[Q1B,Q2B]]; mutual cap Cm = -½(C_M[0,1]+C_M[1,0]).
+// Optional grounded-shield image conductor (mirror across z = -glass.thickness).
+const EPS0 = 8.8541878128e-12;
+const BEM = { panelSize: 0.30, epsEff: 4.0, imageShield: true };
+
+function tracePolylineWithEndpoints(t) {
+  const pts = [];
+  const fromObj = State.model.pads.find(p => p.id === t.from) || State.model.fpcPads.find(p => p.id === t.from);
+  const toObj   = State.model.pads.find(p => p.id === t.to)   || State.model.fpcPads.find(p => p.id === t.to);
+  if (fromObj) pts.push([fromObj.x, fromObj.y]);
+  for (const w of t.waypoints) pts.push([w[0], w[1]]);
+  if (toObj) pts.push([toObj.x, toObj.y]);
+  return pts;
+}
+function panelizeTrace(t, panelSize) {
+  const pts = tracePolylineWithEndpoints(t);
+  const W = t.width;
+  const z = layerZBottom('sensor') + getLayer('sensor').thickness / 2;
+  const panels = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [x0, y0] = pts[i], [x1, y1] = pts[i+1];
+    const dx = x1 - x0, dy = y1 - y0;
+    const L = Math.hypot(dx, dy);
+    if (L < 1e-6) continue;
+    const ux = dx / L, uy = dy / L, px = -uy, py = ux;
+    const nLong = Math.max(1, Math.round(L / panelSize));
+    const nPerp = Math.max(1, Math.round(W / panelSize));
+    const dL = L / nLong, dP = W / nPerp;
+    for (let il = 0; il < nLong; il++) {
+      const sl = (il + 0.5) * dL;
+      for (let ip = 0; ip < nPerp; ip++) {
+        const sp = (ip + 0.5) * dP - W / 2;
+        const cx = x0 + ux * sl + px * sp;
+        const cy = y0 + uy * sl + py * sp;
+        panels.push({ x: cx, y: cy, z, area: dL * dP, a: Math.sqrt(dL * dP) });
+      }
+    }
+  }
+  return panels;
+}
+
+// Panelize a pad based on its shape. Each panel approximates a small flat
+// rectangle on the sensor plane. Used for capacitance involving sensor pads.
+function panelizePad(pad, panelSize) {
+  const z = layerZBottom('sensor') + getLayer('sensor').thickness / 2;
+  const panels = [];
+  if (pad.shape === 'circle') {
+    const R = pad.size / 2;
+    const N = Math.max(1, Math.ceil(2 * R / panelSize));
+    const ps = (2 * R) / N;
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      const cx = pad.x - R + (i + 0.5) * ps;
+      const cy = pad.y - R + (j + 0.5) * ps;
+      // Keep panel only if its center is within the disc
+      if ((cx - pad.x) ** 2 + (cy - pad.y) ** 2 <= R * R)
+        panels.push({ x: cx, y: cy, z, area: ps * ps, a: ps });
+    }
+  } else if (pad.shape === 'square') {
+    const S = pad.size;
+    const N = Math.max(1, Math.round(S / panelSize));
+    const ps = S / N;
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      panels.push({ x: pad.x - S/2 + (i+0.5)*ps, y: pad.y - S/2 + (j+0.5)*ps, z, area: ps*ps, a: ps });
+    }
+  } else if (pad.shape === 'ellipse') {
+    const Rx = pad.size / 2, Ry = (pad.size2 || pad.size) / 2;
+    const Nx = Math.max(1, Math.ceil(2 * Rx / panelSize));
+    const Ny = Math.max(1, Math.ceil(2 * Ry / panelSize));
+    const px = (2 * Rx) / Nx, py = (2 * Ry) / Ny;
+    for (let i = 0; i < Nx; i++) for (let j = 0; j < Ny; j++) {
+      const cx = pad.x - Rx + (i + 0.5) * px;
+      const cy = pad.y - Ry + (j + 0.5) * py;
+      if ((cx - pad.x) ** 2 / (Rx * Rx) + (cy - pad.y) ** 2 / (Ry * Ry) <= 1)
+        panels.push({ x: cx, y: cy, z, area: px * py, a: Math.sqrt(px * py) });
+    }
+  } else if (pad.shape === 'roundedSquare') {
+    const S = pad.size, R = Math.min(pad.size2 || pad.size * 0.2, S / 2);
+    const N = Math.max(1, Math.round(S / panelSize));
+    const ps = S / N;
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      const cx = pad.x - S/2 + (i+0.5)*ps;
+      const cy = pad.y - S/2 + (j+0.5)*ps;
+      // exclude corners outside rounded rect
+      const lx = Math.abs(cx - pad.x), ly = Math.abs(cy - pad.y);
+      const inCorner = lx > S/2 - R && ly > S/2 - R;
+      if (inCorner) {
+        const dx = lx - (S/2 - R), dy = ly - (S/2 - R);
+        if (dx*dx + dy*dy > R*R) continue;
+      }
+      panels.push({ x: cx, y: cy, z, area: ps*ps, a: ps });
+    }
+  }
+  return panels;
+}
+
+// Panelize an FPC pad
+function panelizeFpc(f, panelSize) {
+  const z = layerZBottom('sensor') + getLayer('sensor').thickness / 2;
+  const Nx = Math.max(1, Math.round(f.width / panelSize));
+  const Ny = Math.max(1, Math.round(f.height / panelSize));
+  const px = f.width / Nx, py = f.height / Ny;
+  const out = [];
+  for (let i = 0; i < Nx; i++) for (let j = 0; j < Ny; j++) {
+    out.push({ x: f.x - f.width/2 + (i+0.5)*px, y: f.y - f.height/2 + (j+0.5)*py, z, area: px*py, a: Math.sqrt(px*py) });
+  }
+  return out;
+}
+
+function panelizeConductor(ref, panelSize) {
+  if (ref.type === 'trace') {
+    const t = State.model.traces.find(x => x.id === ref.id);
+    if (!t) return null;
+    return { label: '트레이스 ' + t.id, panels: panelizeTrace(t, panelSize) };
+  }
+  if (ref.type === 'pad') {
+    const p = State.model.pads.find(x => x.id === ref.id);
+    if (!p) return null;
+    return { label: '센서 ' + p.id, panels: panelizePad(p, panelSize) };
+  }
+  if (ref.type === 'fpc') {
+    const f = State.model.fpcPads.find(x => x.id === ref.id);
+    if (!f) return null;
+    return { label: 'FPC ' + f.id, panels: panelizeFpc(f, panelSize) };
+  }
+  return null;
+}
+function greenSelf(panel, epsEff) {
+  const a = panel.a * 1e-3;
+  return a * Math.log(1 + Math.SQRT2) / (2 * Math.PI * EPS0 * epsEff);
+}
+function greenOff(pi, pj, epsEff, withImage, imageZ) {
+  const dx = (pi.x - pj.x) * 1e-3, dy = (pi.y - pj.y) * 1e-3, dz = (pi.z - pj.z) * 1e-3;
+  const r = Math.sqrt(dx*dx + dy*dy + dz*dz) + 1e-12;
+  const A = pj.area * 1e-6;
+  let P = A / (4 * Math.PI * EPS0 * epsEff * r);
+  if (withImage) {
+    const dzi = (pi.z - (2*imageZ - pj.z)) * 1e-3;
+    const ri = Math.sqrt(dx*dx + dy*dy + dzi*dzi) + 1e-12;
+    P -= A / (4 * Math.PI * EPS0 * epsEff * ri);
+  }
+  return P;
+}
+function gaussSolve(A, b) {
+  const n = b.length;
+  const M = A.map(r => r.slice());
+  const x = b.slice();
+  for (let k = 0; k < n; k++) {
+    let maxA = Math.abs(M[k][k]); let pr = k;
+    for (let i = k + 1; i < n; i++) if (Math.abs(M[i][k]) > maxA) { maxA = Math.abs(M[i][k]); pr = i; }
+    if (pr !== k) { const tmp = M[k]; M[k] = M[pr]; M[pr] = tmp;
+      const t2 = x[k]; x[k] = x[pr]; x[pr] = t2; }
+    if (Math.abs(M[k][k]) < 1e-30) throw new Error('singular system');
+    for (let i = k + 1; i < n; i++) {
+      const f = M[i][k] / M[k][k]; if (f === 0) continue;
+      for (let j = k; j < n; j++) M[i][j] -= f * M[k][j];
+      x[i] -= f * x[k];
+    }
+  }
+  for (let i = n - 1; i >= 0; i--) {
+    let s = x[i]; for (let j = i + 1; j < n; j++) s -= M[i][j] * x[j];
+    x[i] = s / M[i][i];
+  }
+  return x;
+}
+function computeBEMCapacitanceGeneric(condA, condB, opts) {
+  const o = Object.assign({}, BEM, opts || {});
+  const panelsA = condA.panels, panelsB = condB.panels;
+  const panels = panelsA.concat(panelsB);
+  const NA = panelsA.length, NB = panelsB.length, N = NA + NB;
+  if (N < 2) throw new Error('panel 수 부족 — 도체 크기/패널 크기를 확인하세요');
+  if (N > 800) throw new Error('패널 수가 너무 많습니다 (' + N + '). 패널 크기를 키우세요.');
+  const imageZ = -State.model.glass.thickness;
+  const P = Array.from({length: N}, () => new Array(N).fill(0));
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      P[i][j] = (i === j) ? greenSelf(panels[i], o.epsEff)
+                          : greenOff(panels[i], panels[j], o.epsEff, o.imageShield, imageZ);
+    }
+  }
+  const v1 = new Array(N).fill(0); for (let i = 0; i < NA; i++) v1[i] = 1.0;
+  const v2 = new Array(N).fill(0); for (let i = NA; i < N; i++) v2[i] = 1.0;
+  const sigma1 = gaussSolve(P, v1);
+  const sigma2 = gaussSolve(P, v2);
+  const qOf = (sigma, panels) => { let q = 0; for (let i = 0; i < panels.length; i++) q += sigma[i] * (panels[i].area * 1e-6); return q; };
+  const Q1A = qOf(sigma1.slice(0, NA), panelsA);
+  const Q1B = qOf(sigma1.slice(NA),    panelsB);
+  const Q2A = qOf(sigma2.slice(0, NA), panelsA);
+  const Q2B = qOf(sigma2.slice(NA),    panelsB);
+  const CM = [[Q1A, Q2A],[Q1B, Q2B]];
+  const Cm = -0.5 * (CM[0][1] + CM[1][0]);
+  const CselfA = CM[0][0] + CM[0][1];
+  const CselfB = CM[1][0] + CM[1][1];
+  return { CM, Cm, CselfA, CselfB, NA, NB };
+}
+function fmtCap(v) {
+  const av = Math.abs(v);
+  if (av >= 1e-9)  return (v*1e9 ).toFixed(4) + ' nF';
+  if (av >= 1e-12) return (v*1e12).toFixed(4) + ' pF';
+  if (av >= 1e-15) return (v*1e15).toFixed(4) + ' fF';
+  if (av >= 1e-18) return (v*1e18).toFixed(4) + ' aF';
+  return v.toExponential(3) + ' F';
+}
+function openCapModal(refA, refB) {
+  const m = $('capModal');
+  const condALabel = panelizeConductor(refA, BEM.panelSize)?.label || refA.id;
+  const condBLabel = panelizeConductor(refB, BEM.panelSize)?.label || refB.id;
+  $('capBody').innerHTML =
+    '<div class="small"><b style="color:var(--accent)">' + condALabel + '</b> ↔ <b style="color:var(--accent)">' + condBLabel + '</b></div>' +
+    '<div class="row" style="margin-top:8px"><label>패널 크기 (mm)</label><input type="number" id="bemPanelSize" value="' + BEM.panelSize + '" step="0.05" min="0.05" style="width:80px"></div>' +
+    '<div class="row"><label>유효 ε_r</label><input type="number" id="bemEpsEff" value="' + BEM.epsEff + '" step="0.1" min="1" style="width:80px"></div>' +
+    '<div class="row"><label>Shield 이미지 포함</label><input type="checkbox" id="bemImage" ' + (BEM.imageShield?'checked':'') + '></div>' +
+    '<div class="row"><button id="bemRecompute" class="primary">계산</button>' +
+    '<span class="small" style="margin-left:8px">ε_0 = ' + EPS0.toExponential(3) + ' F/m</span></div>' +
+    '<div id="bemResult" class="small" style="margin-top:10px; line-height:1.6">계산 중…</div>';
+  m.classList.add('open');
+  const recompute = () => {
+    BEM.panelSize  = parseFloat($('bemPanelSize').value) || 0.3;
+    BEM.epsEff     = parseFloat($('bemEpsEff').value)    || 4.0;
+    BEM.imageShield = $('bemImage').checked;
+    $('bemResult').innerHTML = '계산 중…';
+    setTimeout(() => {
+      try {
+        const condA = panelizeConductor(refA, BEM.panelSize);
+        const condB = panelizeConductor(refB, BEM.panelSize);
+        if (!condA || !condB) throw new Error('도체를 찾을 수 없습니다');
+        const r = computeBEMCapacitanceGeneric(condA, condB);
+        $('bemResult').innerHTML =
+          '<div style="font-size:14px"><b>상호 캐패시턴스 Cₘ = <span style="color:var(--accent)">' + fmtCap(r.Cm) + '</span></b></div>' +
+          '<div style="margin-top:6px">패널 수: ' + condA.label + '=' + r.NA + ', ' + condB.label + '=' + r.NB + ' (총 ' + (r.NA+r.NB) + ')</div>' +
+          '<div>C<sub>self</sub>(' + condA.label + ') = ' + fmtCap(r.CselfA) + '</div>' +
+          '<div>C<sub>self</sub>(' + condB.label + ') = ' + fmtCap(r.CselfB) + '</div>' +
+          '<div style="margin-top:6px">Maxwell 행렬:</div>' +
+          '<pre style="background:#1c1f25; padding:6px; border-radius:4px; color:#c0c8d0; font-size:11px; margin:4px 0;">[ ' + fmtCap(r.CM[0][0]).padEnd(12) + ' ' + fmtCap(r.CM[0][1]) + ' ]\n[ ' + fmtCap(r.CM[1][0]).padEnd(12) + ' ' + fmtCap(r.CM[1][1]) + ' ]</pre>' +
+          '<div class="small">매개변수: panel=' + BEM.panelSize + 'mm, ε_r=' + BEM.epsEff + ', image=' + (BEM.imageShield?'on':'off') + '</div>';
+      } catch (err) {
+        $('bemResult').innerHTML = '<span style="color:var(--danger)">오류: ' + err.message + '</span>';
+      }
+    }, 50);
+  };
+  $('bemRecompute').addEventListener('click', recompute);
+  recompute();
+}
+function getCapConductorRefs() {
+  const refs = [];
+  if (State.selected) {
+    if (['trace','pad','fpc'].includes(State.selected.type))
+      refs.push({ type: State.selected.type, id: State.selected.id });
+  }
+  for (const id of State.multiSelect.traces) if (!refs.find(r => r.type==='trace' && r.id===id)) refs.push({ type:'trace', id });
+  for (const id of State.multiSelect.pads)   if (!refs.find(r => r.type==='pad'   && r.id===id)) refs.push({ type:'pad',   id });
+  for (const id of State.multiSelect.fpcs)   if (!refs.find(r => r.type==='fpc'   && r.id===id)) refs.push({ type:'fpc',   id });
+  return refs;
+}
+function tryShowCapacitance() {
+  const refs = getCapConductorRefs();
+  if (refs.length !== 2) { toast('트레이스/센서/FPC 중 두 개를 선택하세요 (Shift+클릭 또는 마퀴)', 'error'); return; }
+  openCapModal(refs[0], refs[1]);
+}
+function updateCapButton() {
+  const refs = getCapConductorRefs();
+  const btn = $('btnCap'); if (!btn) return;
+  btn.disabled = refs.length !== 2;
+  if (refs.length === 2) {
+    const labels = { trace: '트레이스', pad: '센서', fpc: 'FPC' };
+    btn.title = labels[refs[0].type] + ' ' + refs[0].id + ' ↔ ' + labels[refs[1].type] + ' ' + refs[1].id + ' BEM 캐패시턴스 계산';
+    btn.classList.add('active');
+  } else {
+    btn.title = '트레이스/센서/FPC 중 두 개를 선택하면 활성화';
+    btn.classList.remove('active');
+  }
+}
+$('btnCap').addEventListener('click', tryShowCapacitance);
+$('capClose').addEventListener('click', () => $('capModal').classList.remove('open'));
+
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w * window.devicePixelRatio || canvas.height !== h * window.devicePixelRatio) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+  }
+}
+function loop() { resize(); controls.update(); renderer.render(scene, camera); requestAnimationFrame(loop); }
+
+function init() {
+  syncGlassInputs(); refreshLayerList(); refreshLists(); refreshStatus(); refreshSelectionPanel();
+  rebuildAll(); setMode('select'); fitView(); updateHistoryButtons(); updateCapButton(); loop();
+}
+init();
+</script>
+</body>
+</html>
