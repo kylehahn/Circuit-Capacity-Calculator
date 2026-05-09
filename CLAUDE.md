@@ -11,10 +11,12 @@ prototype editable; do not break it.
 
 ## Status
 
-- [ ] Project scaffold (Qt window + OpenGL viewport)
-- [ ] Data model (`Pad`, `Trace`, `FpcPad`, `Layer`, `Model`)
+- [x] Project scaffold (CMake + vcpkg manifest + CI matrix)
+- [x] Data model (`Pad`, `Trace`, `FpcPad`, `Layer`, `GlassPlate`, `Meta`, `Model`)
+- [x] Native JSON format (`.ccc`) — round-trip via `ccc::io::{modelToJson, modelFromJson}`
+- [x] Auto fan-out routing — `Model::generateGrid()` reproduces the JS non-overlapping algorithm
+- [ ] Empty Qt window placeholder (`src/main.cpp`) — replace with real `MainWindow` + `Viewport3D`
 - [ ] GLB import/export (parity with prototype's `userData.sensorEditor`)
-- [ ] Native JSON format (`.ccc`) — primary save format, GLB is export-only
 - [ ] Layer rendering (Glass, Shield, Inorganic, Sensor, Organic)
 - [ ] Pad / trace / FPC rendering
 - [ ] Selection + drag tools, modes (select / addPad / deletePad / addTrace / editTrace / moveFpc)
@@ -24,7 +26,6 @@ prototype editable; do not break it.
 - [ ] Undo/redo via `QUndoStack`
 - [ ] BEM capacitance solver (Eigen + OpenMP, optional MKL)
 - [ ] Cap calculation modal
-- [ ] Auto fan-out routing (re-implement the non-overlapping algorithm)
 
 ## Build
 
@@ -51,6 +52,8 @@ variables are needed once `tools/bootstrap.{sh,ps1}` has been run.
   Link Intel MKL when available (define `EIGEN_USE_MKL_ALL`).
 - 3D rendering: raw OpenGL 4.5 in a `QOpenGLWidget` subclass. **Not** Qt 3D.
 - Tests: **Catch2 v3** under `tests/`, mirroring `src/`.
+  Test names must be **ASCII only** — Windows CMD's cp949 mangles em-dashes
+  and arrows in CTest filter args, breaking discovery on that platform.
 - Coordinates: Z-up (matches prototype). Geometry units: millimetres.
   Capacitance results in farads (SI).
 

@@ -29,11 +29,29 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic -Wshadow)
 endif()
 
+# --- Optional compiler caching (sccache or ccache) ------------------------
+# Auto-enabled if either is found on PATH; otherwise builds run normally.
+# To install: `winget install Mozilla.sccache` (Win), `brew install sccache`
+# (mac), distro package (Linux). For shared remote cache see CLAUDE.md.
+find_program(CCC_COMPILER_LAUNCHER NAMES sccache ccache)
+if(CCC_COMPILER_LAUNCHER)
+    set(CMAKE_C_COMPILER_LAUNCHER   "${CCC_COMPILER_LAUNCHER}" CACHE FILEPATH "" FORCE)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCC_COMPILER_LAUNCHER}" CACHE FILEPATH "" FORCE)
+    message(STATUS "  compiler-cache  ${CCC_COMPILER_LAUNCHER}")
+else()
+    # Clear any stale launcher value from a previous configure so a missing
+    # cache executable doesn't break the build.
+    unset(CMAKE_C_COMPILER_LAUNCHER CACHE)
+    unset(CMAKE_CXX_COMPILER_LAUNCHER CACHE)
+    message(STATUS "  compiler-cache  not found (install sccache/ccache for faster rebuilds)")
+endif()
+
 # --- Dependencies (resolved by vcpkg manifest) -----------------------------
 find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Concurrent)
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
-find_package(tinygltf CONFIG REQUIRED)
+# tinygltf is header-only — no CMake config package, just an include path.
+find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h" REQUIRED)
 find_package(OpenMP)
 
 # --- Targets ---------------------------------------------------------------

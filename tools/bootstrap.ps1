@@ -8,10 +8,15 @@ Set-Location $repoRoot
 New-Item -ItemType Directory -Force -Path external | Out-Null
 
 if (-not (Test-Path 'external\vcpkg\.git')) {
-    Write-Host '[1/3] Cloning vcpkg into external\vcpkg...'
-    git clone --depth=1 https://github.com/microsoft/vcpkg.git external\vcpkg
+    Write-Host '[1/3] Cloning vcpkg into external\vcpkg (full history — needed for versioning)...'
+    git clone https://github.com/microsoft/vcpkg.git external\vcpkg
 } else {
-    Write-Host '[1/3] external\vcpkg already present — skipping clone'
+    Write-Host '[1/3] external\vcpkg already present — checking it has full history'
+    $isShallow = git -C external\vcpkg rev-parse --is-shallow-repository
+    if ($isShallow.Trim() -eq 'true') {
+        Write-Host '       (shallow clone detected — fetching full history)'
+        git -C external\vcpkg fetch --unshallow
+    }
 }
 
 if (-not (Test-Path 'external\vcpkg\vcpkg.exe')) {

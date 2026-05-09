@@ -30,12 +30,17 @@ ctest --preset linux-release
 
 | Platform | Compiler | Other |
 |----------|----------|-------|
-| Windows  | Visual Studio 2022 (MSVC + CMake + Windows SDK) | Git, PowerShell 7 |
+| Windows  | Visual Studio 2022 (MSVC + "C++ CMake tools for Windows") | Git, PowerShell 7 |
 | macOS    | Xcode 15+ command-line tools                    | Homebrew, `brew install cmake ninja pkg-config` |
 | Linux    | GCC 12+ or Clang 15+                            | `sudo apt install build-essential cmake ninja-build git pkg-config libgl1-mesa-dev libxkbcommon-dev libxcb*-dev libxkbcommon-x11-dev` (full list in `.github/workflows/build.yml`) |
 
-CMake **3.25** or newer. Ninja recommended (Visual Studio generator works on
-Windows but is slower).
+CMake **3.25** or newer. Ninja generator (faster than Visual Studio's MSBuild
+generator). On Windows, Ninja and MSVC ship inside Visual Studio's
+**Developer PowerShell** — the build commands below must be run from that
+shell, not regular PowerShell:
+
+> Start menu → search "**Developer PowerShell for VS 2022**" → run from there.
+> Or open the project folder in Visual Studio and use its built-in terminal.
 
 ## Multi-machine workflow
 

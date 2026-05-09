@@ -1,18 +1,23 @@
 qt_standard_project_setup()
 
+# Header-only / static modules that don't depend on Qt
+add_subdirectory(core)
+add_subdirectory(io)
+
 qt_add_executable(circuit_capacity_calculator
     main.cpp
 )
 
 target_link_libraries(circuit_capacity_calculator PRIVATE
+    ccc_core
+    ccc_io
     Qt6::Widgets
     Qt6::OpenGL
     Qt6::OpenGLWidgets
     Qt6::Concurrent
-    Eigen3::Eigen
-    nlohmann_json::nlohmann_json
-    tinygltf::tinygltf
 )
+# tinygltf is header-only; wire its include dir in when we add GLB I/O.
+# target_include_directories(circuit_capacity_calculator PRIVATE ${TINYGLTF_INCLUDE_DIRS})
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(circuit_capacity_calculator PRIVATE OpenMP::OpenMP_CXX)

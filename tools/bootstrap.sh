@@ -10,10 +10,14 @@ cd "$(dirname "$0")/.."
 mkdir -p external
 
 if [[ ! -d external/vcpkg/.git ]]; then
-    echo "[1/3] Cloning vcpkg into external/vcpkg..."
-    git clone --depth=1 https://github.com/microsoft/vcpkg.git external/vcpkg
+    echo "[1/3] Cloning vcpkg into external/vcpkg (full history — needed for versioning)..."
+    git clone https://github.com/microsoft/vcpkg.git external/vcpkg
 else
-    echo "[1/3] external/vcpkg already present — skipping clone"
+    echo "[1/3] external/vcpkg already present — checking it has full history"
+    if [[ "$(git -C external/vcpkg rev-parse --is-shallow-repository)" == "true" ]]; then
+        echo "       (shallow clone detected — fetching full history)"
+        git -C external/vcpkg fetch --unshallow
+    fi
 fi
 
 if [[ ! -x external/vcpkg/vcpkg ]]; then
