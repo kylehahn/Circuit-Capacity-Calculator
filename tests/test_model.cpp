@@ -48,7 +48,7 @@ TEST_CASE("default fan-out: non-overlapping mapping puts P1 to F2", "[model]") {
     // Each trace has exactly 3 waypoints (drop-out, vertical, sweep)
     for (const auto& t : m.traces) {
         REQUIRE(t.waypoints.size() == 3);
-        REQUIRE(t.width == Approx(0.4));
+        REQUIRE(t.width == Approx(0.002));
     }
 }
 

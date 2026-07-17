@@ -1,0 +1,1865 @@
+#include "Viewport3D.hpp"
+
+#include <QKeyEvent>
+#include <QMouseEvent>
+#include <QWheelEvent>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <map>
+#include <numbers>
+#include <numeric>
+
+namespace ccc::ui {
+
+// ============================================================================
+//  GLSL shaders — Lambert + ambient, single directional light
+// ============================================================================
+namespace {
+constexpr const char* kVertSrc = R"GLSL(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vNormal;
+void main() {
+    vNormal = mat3(uModel) * aNormal;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)GLSL";
+
+constexpr const char* kFragSrc = R"GLSL(
+#version 330 core
+in  vec3 vNormal;
+out vec4 outColor;
+uniform vec4 uColor;
+uniform vec3 uLightDir;
+void main() {
+    vec3 N = normalize(vNormal);
+    float diff = max(dot(N, normalize(uLightDir)), 0.0);
+    float k = 0.35 + 0.7 * diff;
+    outColor = vec4(uColor.rgb * k, uColor.a);
+}
+)GLSL";
+
+constexpr QColor kGlassColor      {  85, 130, 145, 110 };
+constexpr QColor kShieldColor     { 240, 160,  64, 220 };
+constexpr QColor kInorganicColor  { 160, 160, 160, 200 };
+constexpr QColor kOrganicColor    { 208, 212, 220, 110 };
+constexpr QColor kPadColor        {  64,  64,  64, 255 };
+constexpr QColor kPadHoverColor   { 255, 240, 160, 255 };
+constexpr QColor kPadSelectColor  {  76, 194, 255, 255 };
+constexpr QColor kTraceColor      {  64,  64,  64, 255 };
+constexpr QColor kTraceSelect     {  76, 194, 255, 255 };
+constexpr QColor kFpcColor        {  58, 110, 232, 255 };
+constexpr QColor kFpcSelect       {  76, 194, 255, 255 };
+constexpr QColor kWaypointHandle  { 255, 184,  76, 255 };
+constexpr QColor kDraftLine       {  76, 194, 255, 255 };
+constexpr QColor kCapPickA        {  76, 194, 255, 255 };   // first conductor pick
+constexpr QColor kCapPickB        { 255, 184,  76, 255 };   // second conductor pick
+constexpr QColor kGridColor       {  90, 110, 130, 140 };
+constexpr QColor kZoneColor       { 200, 130,  60, 255 };   // pour outline (orange)
+
+QColor colorForLayer(const QString& id) {
+    if (id == QLatin1String("shield"))    return kShieldColor;
+    if (id == QLatin1String("inorganic")) return kInorganicColor;
+    if (id == QLatin1String("organic"))   return kOrganicColor;
+    if (id == QLatin1String("sensor"))    return kPadColor;
+    return QColor(170, 170, 170, 220);
+}
+
+// ----------------------------------------------------------------------------
+//  Ear-clipping triangulation. Handles arbitrary simple polygons (concave OK,
+//  no self-intersections, no holes). Returns a flat list of vertex indices,
+//  3 per triangle.
+//
+//  Implementation: classic ear-clip on a doubly-linked list, with separate
+//  tracking of reflex vertices so the inner "is this triangle empty?" test
+//  only walks reflex vertices instead of the whole polygon. Net cost is
+//  ~O(n * R) where R is the number of reflex vertices -- comfortably under
+//  a second for KiCad ground planes with thousands of via notches. The
+//  previous O(n^3) version had a 200-vertex cap that fell back to a
+//  bounding-box quad for any larger pour, which is why most layers showed
+//  up as flat rectangles rather than the actual filled copper.
+// ----------------------------------------------------------------------------
+inline double triCross(double ax, double ay, double bx, double by, double cx, double cy) {
+    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+}
+inline bool pointInTriStrict(double px, double py,
+                             double ax, double ay, double bx, double by,
+                             double cx, double cy) {
+    const double d1 = triCross(px, py, ax, ay, bx, by);
+    const double d2 = triCross(px, py, bx, by, cx, cy);
+    const double d3 = triCross(px, py, cx, cy, ax, ay);
+    const bool hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+    const bool hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+    return !(hasNeg && hasPos);
+}
+std::vector<int> earClipTriangulate(const std::vector<std::array<double,2>>& poly) {
+    std::vector<int> tris;
+    const int n = int(poly.size());
+    if (n < 3) return tris;
+    if (n == 3) { tris = {0, 1, 2}; return tris; }
+    // Hard cap as a final safety net. KiCad pours with > 50000 vertices are
+    // pathological and probably indicate a parser bug; bail rather than
+    // burning seconds on triangulation.
+    constexpr int kHardCap = 50000;
+    if (n > kHardCap) return tris;
+    tris.reserve(size_t(n - 2) * 3);
+
+    // Force CCW winding so the convexity test below is uniform.
+    double area = 0;
+    for (int i = 0; i < n; ++i) {
+        const auto& a = poly[i];
+        const auto& b = poly[(i + 1) % n];
+        area += a[0] * b[1] - b[0] * a[1];
+    }
+    std::vector<int> map(n);
+    for (int i = 0; i < n; ++i) map[i] = (area >= 0) ? i : (n - 1 - i);
+    auto P = [&](int i) -> const std::array<double,2>& { return poly[map[i]]; };
+
+    // Doubly-linked list over the n indices 0..n-1 (in our local CCW order).
+    std::vector<int> nxt(n), prv(n);
+    std::vector<bool> alive(n, true);
+    for (int i = 0; i < n; ++i) { nxt[i] = (i + 1) % n; prv[i] = (i + n - 1) % n; }
+
+    auto isConvex = [&](int i) {
+        const auto& a = P(prv[i]); const auto& b = P(i); const auto& c = P(nxt[i]);
+        return triCross(a[0], a[1], b[0], b[1], c[0], c[1]) > 0;
+    };
+
+    // Track reflex (non-convex) vertices in a small set for fast inclusion
+    // tests. The "is ear" check only needs to scan reflex vertices: any
+    // convex vertex inside the candidate triangle would imply a self-
+    // intersection, which our input polygons don't have.
+    std::vector<bool> isReflex(n, false);
+    std::vector<int> reflexList;
+    reflexList.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        if (!isConvex(i)) { isReflex[i] = true; reflexList.push_back(i); }
+    }
+    auto removeFromReflex = [&](int v) {
+        if (!isReflex[v]) return;
+        isReflex[v] = false;
+        // Lazy removal: keep the entry in the list, skip when we walk it.
+    };
+
+    auto isEar = [&](int i) {
+        if (!isConvex(i)) return false;
+        const int pi = prv[i], ni = nxt[i];
+        const auto& a = P(pi); const auto& b = P(i); const auto& c = P(ni);
+        for (int r : reflexList) {
+            if (!alive[r] || !isReflex[r]) continue;
+            if (r == pi || r == i || r == ni) continue;
+            const auto& q = P(r);
+            if (pointInTriStrict(q[0], q[1], a[0], a[1], b[0], b[1], c[0], c[1]))
+                return false;
+        }
+        return true;
+    };
+
+    int remaining = n;
+    int cursor   = 0;
+    int guard    = n * 4;     // upper bound on consecutive non-clip iterations
+    while (remaining > 3 && guard > 0) {
+        if (alive[cursor] && isEar(cursor)) {
+            const int pi = prv[cursor], ni = nxt[cursor];
+            tris.push_back(map[pi]); tris.push_back(map[cursor]); tris.push_back(map[ni]);
+            // Splice cursor out.
+            alive[cursor] = false;
+            removeFromReflex(cursor);
+            nxt[pi] = ni; prv[ni] = pi;
+            // Convexity / reflex status of pi, ni may have changed.
+            for (int v : {pi, ni}) {
+                const bool nowConvex = isConvex(v);
+                if (nowConvex && isReflex[v]) {
+                    isReflex[v] = false;        // promote to convex
+                } else if (!nowConvex && !isReflex[v]) {
+                    isReflex[v] = true;         // demote to reflex
+                    reflexList.push_back(v);
+                }
+            }
+            cursor = ni;
+            --remaining;
+            guard = n * 4;          // reset
+        } else {
+            cursor = nxt[cursor];
+            --guard;
+        }
+    }
+    if (remaining == 3) {
+        // Last triangle — find any three alive vertices.
+        int a = -1, b = -1, c = -1;
+        for (int i = 0; i < n && c < 0; ++i) {
+            if (!alive[i]) continue;
+            if (a < 0) a = i;
+            else if (b < 0) b = i;
+            else c = i;
+        }
+        if (a >= 0 && b >= 0 && c >= 0) {
+            tris.push_back(map[a]); tris.push_back(map[b]); tris.push_back(map[c]);
+        }
+    }
+    return tris;
+}
+
+// Append a flat top-face rectangle (two triangles) to `dest` representing a
+// box of length L (along the rotated X axis), width w (along rotated Y),
+// centred at (cx, cy, z). All four vertices share normal (0, 0, 1) so
+// shading works in 3D mode. Used when baking thousands of trace segments
+// and zone-outline edges into a single per-layer mesh — we render the
+// top face only (the user's primary view is 2D top-down), trading a flat
+// look in 3D for a 1000× draw-call reduction.
+template <typename Vert>
+inline void appendOrientedQuad(std::vector<Vert>& verts,
+                               std::vector<uint32_t>& idx,
+                               double cx, double cy, double z,
+                               double angleRad,
+                               double L, double w) {
+    const double c  = std::cos(angleRad), s = std::sin(angleRad);
+    const double hx = L * 0.5,            hy = w * 0.5;
+    auto rt = [&](double lx, double ly) -> std::array<float, 3> {
+        return { float(cx + lx * c - ly * s),
+                 float(cy + lx * s + ly * c),
+                 float(z) };
+    };
+    const auto p0 = rt(-hx, -hy);
+    const auto p1 = rt( hx, -hy);
+    const auto p2 = rt( hx,  hy);
+    const auto p3 = rt(-hx,  hy);
+    const uint32_t b = uint32_t(verts.size());
+    verts.push_back({p0[0], p0[1], p0[2], 0, 0, 1});
+    verts.push_back({p1[0], p1[1], p1[2], 0, 0, 1});
+    verts.push_back({p2[0], p2[1], p2[2], 0, 0, 1});
+    verts.push_back({p3[0], p3[1], p3[2], 0, 0, 1});
+    idx.push_back(b);     idx.push_back(b + 1); idx.push_back(b + 2);
+    idx.push_back(b);     idx.push_back(b + 2); idx.push_back(b + 3);
+}
+
+// Per-layer colour for KiCad copper layers, used to colour traces / pads /
+// zones differently per copper layer so a 4-layer PCB is readable.
+QColor colorForKicadLayer(const std::string& id) {
+    if (id == "F.Cu")  return QColor(220,  60,  60, 255);   // red
+    if (id == "B.Cu")  return QColor( 60, 160,  90, 255);   // green
+    if (id == "In1.Cu") return QColor(220, 180,  60, 255);  // yellow
+    if (id == "In2.Cu") return QColor( 80, 140, 220, 255);  // blue
+    if (id == "In3.Cu") return QColor(180,  90, 200, 255);  // purple
+    if (id == "In4.Cu") return QColor(200, 140,  60, 255);  // orange
+    if (id == "In5.Cu") return QColor( 60, 180, 200, 255);  // cyan
+    if (id == "In6.Cu") return QColor(220, 100, 160, 255);  // pink
+    return QColor(170, 170, 170, 255);
+}
+}  // namespace
+
+// ============================================================================
+//  GpuMesh
+// ============================================================================
+void Viewport3D::GpuMesh::upload(QOpenGLFunctions_3_3_Core*, const Mesh& m) {
+    if (!ready) { vbo.create(); ibo.create(); ready = true; }
+    vbo.bind();  vbo.allocate(m.vertices.data(), int(m.vertices.size() * sizeof(Vertex)));
+    ibo.bind();  ibo.allocate(m.indices.data(),  int(m.indices.size()  * sizeof(uint32_t)));
+    indexCount = int(m.indices.size());
+}
+void Viewport3D::GpuMesh::release() {
+    if (vbo.isCreated()) vbo.destroy();
+    if (ibo.isCreated()) ibo.destroy();
+    indexCount = 0;
+    ready = false;
+}
+
+// ============================================================================
+//  Mesh builders
+// ============================================================================
+Viewport3D::Mesh Viewport3D::makeBoxMesh(float w, float h, float d) {
+    const float x = w * 0.5f, y = h * 0.5f, z = d * 0.5f;
+    Mesh m;
+    auto add  = [&](float px, float py, float pz, float nx, float ny, float nz) {
+        m.vertices.push_back({px, py, pz, nx, ny, nz});
+    };
+    auto face = [&](int a, int b, int c, int dx) {
+        m.indices.push_back(uint32_t(a));  m.indices.push_back(uint32_t(b));  m.indices.push_back(uint32_t(c));
+        m.indices.push_back(uint32_t(a));  m.indices.push_back(uint32_t(c));  m.indices.push_back(uint32_t(dx));
+    };
+    int b = 0;
+    add(-x,-y,-z, -1,0,0); add(-x, y,-z, -1,0,0); add(-x, y, z, -1,0,0); add(-x,-y, z, -1,0,0); face(b,b+1,b+2,b+3); b+=4;
+    add( x,-y,-z, 1,0,0);  add( x, y,-z, 1,0,0);  add( x, y, z, 1,0,0);  add( x,-y, z, 1,0,0);  face(b+3,b+2,b+1,b); b+=4;
+    add(-x,-y,-z, 0,-1,0); add( x,-y,-z, 0,-1,0); add( x,-y, z, 0,-1,0); add(-x,-y, z, 0,-1,0); face(b,b+1,b+2,b+3); b+=4;
+    add(-x, y,-z, 0,1,0);  add( x, y,-z, 0,1,0);  add( x, y, z, 0,1,0);  add(-x, y, z, 0,1,0);  face(b+3,b+2,b+1,b); b+=4;
+    add(-x,-y,-z, 0,0,-1); add( x,-y,-z, 0,0,-1); add( x, y,-z, 0,0,-1); add(-x, y,-z, 0,0,-1); face(b+3,b+2,b+1,b); b+=4;
+    add(-x,-y, z, 0,0,1);  add( x,-y, z, 0,0,1);  add( x, y, z, 0,0,1);  add(-x, y, z, 0,0,1);  face(b,b+1,b+2,b+3);
+    return m;
+}
+
+Viewport3D::Mesh Viewport3D::makeCylinderMesh(int segments) {
+    Mesh m;
+    const float pi = std::numbers::pi_v<float>;
+    for (int i = 0; i <= segments; ++i) {
+        const float a = (float)i / segments * 2.0f * pi;
+        const float cx = std::cos(a), sy = std::sin(a);
+        m.vertices.push_back({cx, sy, 0.0f, cx, sy, 0.0f});
+        m.vertices.push_back({cx, sy, 1.0f, cx, sy, 0.0f});
+    }
+    for (int i = 0; i < segments; ++i) {
+        const uint32_t a = i*2u, b = a+1u, c = a+2u, d = a+3u;
+        m.indices.push_back(a); m.indices.push_back(b); m.indices.push_back(c);
+        m.indices.push_back(b); m.indices.push_back(d); m.indices.push_back(c);
+    }
+    const uint32_t bottomCenter = uint32_t(m.vertices.size());
+    m.vertices.push_back({0,0,0, 0,0,-1});
+    const uint32_t bottomFirst = uint32_t(m.vertices.size());
+    for (int i = 0; i < segments; ++i) {
+        const float a = (float)i / segments * 2.0f * pi;
+        m.vertices.push_back({std::cos(a), std::sin(a), 0.0f, 0,0,-1});
+    }
+    for (int i = 0; i < segments; ++i) {
+        const uint32_t a = bottomFirst + i;
+        const uint32_t b = bottomFirst + (i + 1) % segments;
+        m.indices.push_back(bottomCenter); m.indices.push_back(b); m.indices.push_back(a);
+    }
+    const uint32_t topCenter = uint32_t(m.vertices.size());
+    m.vertices.push_back({0,0,1, 0,0,1});
+    const uint32_t topFirst = uint32_t(m.vertices.size());
+    for (int i = 0; i < segments; ++i) {
+        const float a = (float)i / segments * 2.0f * pi;
+        m.vertices.push_back({std::cos(a), std::sin(a), 1.0f, 0,0,1});
+    }
+    for (int i = 0; i < segments; ++i) {
+        const uint32_t a = topFirst + i;
+        const uint32_t b = topFirst + (i + 1) % segments;
+        m.indices.push_back(topCenter); m.indices.push_back(a); m.indices.push_back(b);
+    }
+    return m;
+}
+
+Viewport3D::Mesh Viewport3D::makeSphereMesh(int latBands, int lonBands) {
+    Mesh m;
+    const float pi = std::numbers::pi_v<float>;
+    for (int lat = 0; lat <= latBands; ++lat) {
+        const float theta = lat * pi / latBands;
+        const float st = std::sin(theta), ct = std::cos(theta);
+        for (int lon = 0; lon <= lonBands; ++lon) {
+            const float phi = lon * 2.0f * pi / lonBands;
+            const float sp = std::sin(phi), cp = std::cos(phi);
+            const float x = cp * st, y = sp * st, z = ct;
+            m.vertices.push_back({x, y, z, x, y, z});
+        }
+    }
+    for (int lat = 0; lat < latBands; ++lat) {
+        for (int lon = 0; lon < lonBands; ++lon) {
+            const uint32_t a = uint32_t(lat * (lonBands + 1) + lon);
+            const uint32_t b = a + uint32_t(lonBands + 1);
+            m.indices.push_back(a);     m.indices.push_back(b);     m.indices.push_back(a + 1);
+            m.indices.push_back(b);     m.indices.push_back(b + 1); m.indices.push_back(a + 1);
+        }
+    }
+    return m;
+}
+
+// ============================================================================
+//  Lifecycle / GL setup
+// ============================================================================
+Viewport3D::Viewport3D(QWidget* parent) : QOpenGLWidget(parent) {
+    setMouseTracking(true);
+    setFocusPolicy(Qt::StrongFocus);
+    QSurfaceFormat fmt;
+    fmt.setDepthBufferSize(24);
+    fmt.setVersion(3, 3);
+    fmt.setProfile(QSurfaceFormat::CoreProfile);
+    fmt.setSamples(4);
+    setFormat(fmt);
+}
+Viewport3D::~Viewport3D() {
+    makeCurrent();
+    meshBox_.release();
+    meshCylinder_.release();
+    meshSphere_.release();
+    meshGrid_.release();
+    for (auto& [_, gm] : zoneFillMeshes_) gm.release();
+    zoneFillMeshes_.clear();
+    for (auto& [_, gm] : traceMeshes_) gm.release();
+    traceMeshes_.clear();
+    for (auto& [_, gm] : zoneOutlineMeshes_) gm.release();
+    zoneOutlineMeshes_.clear();
+    for (auto& [_, gm] : netHighlightMeshes_) gm.release();
+    netHighlightMeshes_.clear();
+    if (vao_.isCreated()) vao_.destroy();
+    doneCurrent();
+}
+
+void Viewport3D::setModel(ccc::core::Model* m) {
+    model_ = m;
+    selection_ = {};
+    hover_     = {};
+    traceDraft_.reset();
+    if (isValid()) {
+        rebuildScene();
+        fitView();
+        update();
+    }
+}
+
+void Viewport3D::clearSelection() {
+    if (selection_.isValid()) {
+        selection_ = {};
+        emit selectionChanged(selection_);
+        rebuildBatches();
+        update();
+    }
+}
+
+void Viewport3D::resetCapPicks() {
+    if (capPickA_.empty() && capPickB_.empty()) return;
+    capPickA_ = {};
+    capPickB_ = {};
+    rebuildBatches();
+    update();
+}
+
+bool Viewport3D::refInPick(const SceneRef& ref, const CapPick& c) const {
+    if (ref.kind == QLatin1String("pad")) {
+        for (const auto& id : c.padIds) if (id == ref.id) return true;
+    } else if (ref.kind == QLatin1String("fpc")) {
+        for (const auto& id : c.fpcIds) if (id == ref.id) return true;
+    } else if (ref.kind == QLatin1String("trace")) {
+        for (const auto& id : c.traceIds) if (id == ref.id) return true;
+    }
+    return false;
+}
+
+Viewport3D::CapPick Viewport3D::findConductorOf(const SceneRef& ref) const {
+    CapPick result;
+    if (!model_ || !ref.isValid()) return result;
+
+    // ----- Net-based grouping (KiCad-imported designs) --------------------
+    // If the picked element has a non-empty `net` string, take the entire
+    // conductor to be every pad/trace/FPC sharing that net. This bypasses
+    // topology walks and matches user expectation that a "net" is one node.
+    auto getNet = [&](const SceneRef& r) -> std::string {
+        if (r.kind == QLatin1String("pad")) {
+            for (const auto& p : model_->pads)
+                if (QString::fromStdString(p.id) == r.id) return p.net;
+        } else if (r.kind == QLatin1String("trace") || r.kind == QLatin1String("waypoint")) {
+            for (const auto& t : model_->traces)
+                if (QString::fromStdString(t.id) == r.id) return t.net;
+        } else if (r.kind == QLatin1String("zone")) {
+            for (const auto& z : model_->zones)
+                if (QString::fromStdString(z.id) == r.id) return z.net;
+        }
+        return {};
+    };
+    const std::string seedNet = getNet(ref);
+    if (!seedNet.empty()) {
+        for (const auto& p : model_->pads)
+            if (p.net == seedNet) result.padIds.push_back(QString::fromStdString(p.id));
+        for (const auto& t : model_->traces)
+            if (t.net == seedNet) result.traceIds.push_back(QString::fromStdString(t.id));
+        for (const auto& z : model_->zones)
+            if (z.net == seedNet) result.zoneIds.push_back(QString::fromStdString(z.id));
+        return result;
+    }
+
+    std::map<QString, int> nodeIdx;
+    int n = 0;
+    for (const auto& p : model_->pads)    nodeIdx[QString::fromStdString(p.id)] = n++;
+    for (const auto& f : model_->fpcPads) nodeIdx[QString::fromStdString(f.id)] = n++;
+
+    std::vector<int> parent(n);
+    std::iota(parent.begin(), parent.end(), 0);
+    std::function<int(int)> findRoot = [&](int x) {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    };
+    auto unite = [&](int a, int b) { parent[findRoot(a)] = findRoot(b); };
+
+    for (const auto& t : model_->traces) {
+        auto fIt = nodeIdx.find(QString::fromStdString(t.from));
+        auto tIt = nodeIdx.find(QString::fromStdString(t.to));
+        if (fIt != nodeIdx.end() && tIt != nodeIdx.end())
+            unite(fIt->second, tIt->second);
+    }
+
+    int targetRoot = -1;
+    if (ref.kind == QLatin1String("pad") || ref.kind == QLatin1String("fpc")) {
+        auto it = nodeIdx.find(ref.id);
+        if (it != nodeIdx.end()) targetRoot = findRoot(it->second);
+    } else if (ref.kind == QLatin1String("trace")) {
+        for (const auto& t : model_->traces) {
+            if (QString::fromStdString(t.id) != ref.id) continue;
+            auto fIt = nodeIdx.find(QString::fromStdString(t.from));
+            if (fIt != nodeIdx.end()) targetRoot = findRoot(fIt->second);
+            break;
+        }
+    }
+    if (targetRoot < 0) return result;
+
+    for (const auto& [id, idx] : nodeIdx) {
+        if (findRoot(idx) != targetRoot) continue;
+        const std::string sid = id.toStdString();
+        bool isPad = false;
+        for (const auto& p : model_->pads) if (p.id == sid) { isPad = true; break; }
+        if (isPad) result.padIds.push_back(id);
+        else       result.fpcIds.push_back(id);
+    }
+    for (const auto& t : model_->traces) {
+        auto fIt = nodeIdx.find(QString::fromStdString(t.from));
+        if (fIt != nodeIdx.end() && findRoot(fIt->second) == targetRoot)
+            result.traceIds.push_back(QString::fromStdString(t.id));
+    }
+    return result;
+}
+
+void Viewport3D::buildGridMesh() {
+    if (!model_) return;
+    Mesh m;
+    const float halfX = float(std::max(model_->glass.width,  20.0) * 0.7);
+    const float halfY = float(std::max(model_->glass.height, 20.0) * 0.7);
+    const float z     = float(-model_->glass.thickness - 0.01);
+    const float majorStep = float(std::max(snapSize_ * 5.0, 2.0));
+    auto add = [&](float x1, float y1, float x2, float y2) {
+        const uint32_t i = uint32_t(m.vertices.size());
+        m.vertices.push_back({x1, y1, z, 0, 0, 1});
+        m.vertices.push_back({x2, y2, z, 0, 0, 1});
+        m.indices.push_back(i);
+        m.indices.push_back(i + 1);
+    };
+    for (float x = -halfX; x <= halfX + 0.001f; x += majorStep) add(x, -halfY, x,  halfY);
+    for (float y = -halfY; y <= halfY + 0.001f; y += majorStep) add(-halfX, y, halfX, y);
+    meshGrid_.upload(this, m);
+}
+
+void Viewport3D::initializeGL() {
+    initializeOpenGLFunctions();
+    glEnable(GL_DEPTH_TEST);
+    // No back-face culling: zone fill triangulations produce arbitrary
+    // winding depending on the source polygon's orientation, and we want
+    // them visible from both sides anyway (3D mode).
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glClearColor(0.06f, 0.07f, 0.085f, 1.0f);
+
+    if (!program_.addShaderFromSourceCode(QOpenGLShader::Vertex,   kVertSrc)) qWarning("vert: %s", qPrintable(program_.log()));
+    if (!program_.addShaderFromSourceCode(QOpenGLShader::Fragment, kFragSrc)) qWarning("frag: %s", qPrintable(program_.log()));
+    if (!program_.link()) qWarning("link: %s", qPrintable(program_.log()));
+    uMVP_   = program_.uniformLocation("uMVP");
+    uModel_ = program_.uniformLocation("uModel");
+    uColor_ = program_.uniformLocation("uColor");
+    uLight_ = program_.uniformLocation("uLightDir");
+
+    vao_.create();
+    buildPrototypeMeshes();
+
+    if (model_) { rebuildScene(); fitView(); }
+}
+void Viewport3D::buildPrototypeMeshes() {
+    meshBox_.upload(this,      makeBoxMesh(1.0f, 1.0f, 1.0f));
+    meshCylinder_.upload(this, makeCylinderMesh(48));
+    meshSphere_.upload(this,   makeSphereMesh(12, 24));
+}
+void Viewport3D::resizeGL(int, int) {}
+
+QMatrix4x4 Viewport3D::mvp(const QMatrix4x4& m) const {
+    const float aspect = float(width()) / std::max(1, height());
+    return camera_.projectionMatrix(aspect) * camera_.viewMatrix() * m;
+}
+
+void Viewport3D::paintGL() {
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if (!program_.isLinked()) return;
+
+    // Upload pending dynamic meshes (we have a current GL context here).
+    auto syncLayerMeshes = [this](std::map<std::string, Mesh>& cpu,
+                                  std::map<std::string, GpuMesh>& gpu) {
+        for (auto it = gpu.begin(); it != gpu.end(); ) {
+            if (cpu.find(it->first) == cpu.end()) {
+                it->second.release();
+                it = gpu.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (const auto& [layerId, mesh] : cpu) {
+            auto& gm = gpu[layerId];
+            if (mesh.vertices.empty()) gm.indexCount = 0;
+            else                       gm.upload(this, mesh);
+        }
+    };
+    if (zoneFillsDirty_) {
+        syncLayerMeshes(zoneFillsCpu_, zoneFillMeshes_);
+        zoneFillsDirty_ = false;
+    }
+    if (mergedMeshesDirty_) {
+        syncLayerMeshes(traceCpu_,         traceMeshes_);
+        syncLayerMeshes(zoneOutlineCpu_,   zoneOutlineMeshes_);
+        syncLayerMeshes(netHighlightCpu_,  netHighlightMeshes_);
+        mergedMeshesDirty_ = false;
+    }
+
+    program_.bind();
+    program_.setUniformValue(uLight_, QVector3D(0.4f, -0.3f, 1.0f).normalized());
+    vao_.bind();
+
+    GpuMesh* lastMesh = nullptr;
+    auto drawBatch = [&](const Batch& b) {
+        if (!b.mesh || !b.mesh->ready) return;
+        if (b.mesh != lastMesh) {
+            b.mesh->vbo.bind();
+            b.mesh->ibo.bind();
+            program_.enableAttributeArray(0);
+            program_.enableAttributeArray(1);
+            program_.setAttributeBuffer(0, GL_FLOAT, 0,                 3, sizeof(Vertex));
+            program_.setAttributeBuffer(1, GL_FLOAT, sizeof(float) * 3, 3, sizeof(Vertex));
+            lastMesh = b.mesh;
+        }
+        program_.setUniformValue(uMVP_,   mvp(b.model));
+        program_.setUniformValue(uModel_, b.model);
+        program_.setUniformValue(uColor_, QVector4D(
+            b.color.redF(), b.color.greenF(), b.color.blueF(), b.color.alphaF()));
+        glDrawElements(GL_TRIANGLES, b.mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+    };
+
+    // Pass 1: opaque
+    glDepthMask(GL_TRUE);
+    for (const auto& b : batches_) if (b.color.alpha() >= 255) drawBatch(b);
+
+    // Pass 2: transparent (depth-write off)
+    glDepthMask(GL_FALSE);
+    lastMesh = nullptr;
+    for (const auto& b : batches_) if (b.color.alpha() < 255) drawBatch(b);
+    glDepthMask(GL_TRUE);
+
+    // Pass 3: grid as line strips (read depth, no write)
+    if (gridVisible_ && model_) {
+        if (gridDirty_) { buildGridMesh(); gridDirty_ = false; }
+        if (meshGrid_.ready) {
+            meshGrid_.vbo.bind();
+            meshGrid_.ibo.bind();
+            program_.enableAttributeArray(0);
+            program_.enableAttributeArray(1);
+            program_.setAttributeBuffer(0, GL_FLOAT, 0,                 3, sizeof(Vertex));
+            program_.setAttributeBuffer(1, GL_FLOAT, sizeof(float) * 3, 3, sizeof(Vertex));
+            QMatrix4x4 id;
+            program_.setUniformValue(uMVP_,   mvp(id));
+            program_.setUniformValue(uModel_, id);
+            program_.setUniformValue(uColor_, QVector4D(
+                kGridColor.redF(), kGridColor.greenF(), kGridColor.blueF(), kGridColor.alphaF()));
+            glDepthMask(GL_FALSE);
+            glDrawElements(GL_LINES, meshGrid_.indexCount, GL_UNSIGNED_INT, nullptr);
+            glDepthMask(GL_TRUE);
+        }
+    }
+
+    vao_.release();
+    program_.release();
+}
+
+// ============================================================================
+//  Layer-Z helpers
+// ============================================================================
+double Viewport3D::layerTopZ(const QString& id) const {
+    if (!model_) return 0.0;
+    double z = 0.0;
+    for (const auto& l : model_->layers) {
+        z += l.thickness;
+        if (QString::fromStdString(l.id) == id) return z;
+    }
+    return z;
+}
+double Viewport3D::layerBottomZ(const QString& id) const {
+    if (!model_) return 0.0;
+    auto* layer = model_->findLayer(id.toStdString());
+    return layer ? layerTopZ(id) - layer->thickness : 0.0;
+}
+// Sensor layer = the layer pads/traces/zones live on. Default model uses an
+// id of "sensor"; KiCad imports use names like "F.Cu". Try the named layer
+// first, then fall back to the first conductor layer.
+static QString findRenderLayerId(const ccc::core::Model* m) {
+    if (!m) return QStringLiteral("sensor");
+    if (m->findLayer("sensor")) return QStringLiteral("sensor");
+    for (const auto& l : m->layers)
+        if (l.isConductor) return QString::fromStdString(l.id);
+    if (!m->layers.empty()) return QString::fromStdString(m->layers.front().id);
+    return QStringLiteral("sensor");
+}
+double Viewport3D::sensorTopZ()    const { return layerTopZ(findRenderLayerId(model_)); }
+double Viewport3D::sensorBottomZ() const { return layerBottomZ(findRenderLayerId(model_)); }
+
+// ============================================================================
+//  Scene assembly
+// ============================================================================
+std::vector<std::pair<double,double>> Viewport3D::tracePolylinePoints(const ccc::core::Trace& t) const {
+    std::vector<std::pair<double, double>> pts;
+    if (!model_) return pts;
+    auto findXY = [&](const std::string& id, double& x, double& y) {
+        for (const auto& p : model_->pads)    if (p.id == id) { x = p.x; y = p.y; return true; }
+        for (const auto& f : model_->fpcPads) if (f.id == id) { x = f.x; y = f.y; return true; }
+        return false;
+    };
+    double x, y;
+    if (findXY(t.from, x, y)) pts.emplace_back(x, y);
+    for (const auto& w : t.waypoints) pts.emplace_back(w[0], w[1]);
+    if (findXY(t.to, x, y)) pts.emplace_back(x, y);
+    return pts;
+}
+
+void Viewport3D::rebuildScene() {
+    gridDirty_         = true;
+    staticMeshesDirty_ = true;   // model changed -> re-bake everything
+    rebuildBatches();
+    update();
+}
+
+// Find the KiCad net string for a SceneRef (pad/trace/zone/waypoint).
+// Empty string if the ref doesn't carry a net.
+std::string Viewport3D::netForRef(const SceneRef& r) const {
+    if (!r.isValid() || !model_) return {};
+    const std::string id = r.id.toStdString();
+    if (r.kind == QLatin1String("pad")) {
+        for (const auto& p : model_->pads)   if (p.id == id) return p.net;
+    } else if (r.kind == QLatin1String("trace") ||
+               r.kind == QLatin1String("waypoint")) {
+        for (const auto& t : model_->traces) if (t.id == id) return t.net;
+    } else if (r.kind == QLatin1String("zone")) {
+        for (const auto& z : model_->zones)  if (z.id == id) return z.net;
+    }
+    return {};
+}
+
+void Viewport3D::rebuildBatches() {
+    batches_.clear();
+    if (!model_) return;
+    const auto& M = *model_;
+
+    if (M.glass.visible) {
+        Batch b; b.mesh = &meshBox_;
+        QMatrix4x4 m;
+        m.translate(0.0f, 0.0f, float(-M.glass.thickness * 0.5));
+        m.scale(float(M.glass.width), float(M.glass.height), float(M.glass.thickness));
+        b.model = m; b.color = kGlassColor;
+        batches_.push_back(b);
+    }
+    double z = 0.0;
+    for (const auto& l : M.layers) {
+        if (!l.visible)             { z += l.thickness; continue; }
+        if (l.id == "sensor")       { z += l.thickness; continue; }
+        // Skip rendering conductor layers as full slabs. The actual copper is
+        // represented by pads / traces / zones that live on these layers, and
+        // a full slab would paint over them.
+        if (l.isConductor)          { z += l.thickness; continue; }
+        Batch b; b.mesh = &meshBox_;
+        QMatrix4x4 m;
+        m.translate(0.0f, 0.0f, float(z + l.thickness * 0.5));
+        m.scale(float(M.glass.width), float(M.glass.height), float(l.thickness));
+        b.model = m; b.color = colorForLayer(QString::fromStdString(l.id));
+        batches_.push_back(b);
+        z += l.thickness;
+    }
+
+    // Render layer for pads/traces/zones: use literal "sensor" if present
+    // (legacy default model), else fall back to the first conductor layer
+    // (KiCad imports use F.Cu, B.Cu, etc.). Without this fallback, KiCad
+    // imports would never render pads/traces because no "sensor" id exists.
+    const ccc::core::Layer* sensor = M.findLayer("sensor");
+    if (!sensor) {
+        for (const auto& l : M.layers) if (l.isConductor) { sensor = &l; break; }
+    }
+    // Don't early-return when the fallback "sensor" layer is hidden.
+    // Per-element layerZ() below handles visibility on a layer-by-layer basis;
+    // killing the whole rendering loop here would also hide elements on
+    // OTHER layers (e.g. turning off F.Cu would also hide In1.Cu / B.Cu).
+    if (!sensor) return;   // truly nothing renderable (no copper at all)
+    const float zBot = float(sensorBottomZ());
+    const float h    = float(sensor->thickness);
+
+    // Layer Z resolver. For an element on layer "F.Cu" etc., return that
+    // layer's (zBot, thickness, visible). Empty layer name falls back to
+    // the sensor layer.
+    auto layerZ = [&](const std::string& id, float& outZBot, float& outH,
+                      bool& outVisible) {
+        if (id.empty()) {
+            outZBot = zBot; outH = h; outVisible = true; return;
+        }
+        double zCur = 0.0;
+        for (const auto& l : M.layers) {
+            if (l.id == id) {
+                outZBot = float(zCur);
+                outH    = float(l.thickness);
+                outVisible = l.visible;
+                return;
+            }
+            zCur += l.thickness;
+        }
+        // Unknown layer: fall back to sensor
+        outZBot = zBot; outH = h; outVisible = true;
+    };
+
+    for (const auto& p : M.pads) {
+        float pZBot = zBot, pH = h; bool pVis = true;
+        layerZ(p.layer, pZBot, pH, pVis);
+        if (!pVis) continue;
+        Batch b; QMatrix4x4 m;
+        m.translate(float(p.x), float(p.y), pZBot);
+        switch (p.shape) {
+            case ccc::core::PadShape::Circle:
+                b.mesh = &meshCylinder_;
+                m.scale(float(p.size * 0.5), float(p.size * 0.5), pH);
+                break;
+            case ccc::core::PadShape::Square:
+                b.mesh = &meshBox_;
+                m.translate(0, 0, pH * 0.5f);
+                m.scale(float(p.size), float(p.size), pH);
+                break;
+            case ccc::core::PadShape::Ellipse:
+                b.mesh = &meshCylinder_;
+                m.scale(float(p.size * 0.5), float((p.size2 == 0 ? p.size : p.size2) * 0.5), pH);
+                break;
+            case ccc::core::PadShape::RoundedSquare:
+                b.mesh = &meshCylinder_;
+                m.scale(float(p.size * 0.5), float(p.size * 0.5), pH);
+                break;
+        }
+        b.model = m;
+        const QString pid = QString::fromStdString(p.id);
+        b.ref = {QStringLiteral("pad"), pid, -1};
+        if (mode_ == Mode::CapMeasure && refInPick(b.ref, capPickA_))      b.color = kCapPickA;
+        else if (mode_ == Mode::CapMeasure && refInPick(b.ref, capPickB_)) b.color = kCapPickB;
+        else if (selection_ == b.ref || refInSelections(b.ref)) b.color = kPadSelectColor;
+        else if (hover_ == b.ref)     b.color = kPadHoverColor;
+        else if (!p.layer.empty())    b.color = colorForKicadLayer(p.layer);
+        else                          b.color = kPadColor;
+        batches_.push_back(b);
+    }
+
+    // Traces — merged per-layer baking. For ~1900 KiCad segments this turns
+    // ~1900 individual draw calls into one per layer. We bake ALL traces
+    // (selection-independent) into per-layer meshes once, then keep the
+    // cache until the model changes. Highlights are emitted as overlays
+    // on every rebuild so the user still sees per-element feedback.
+    if (staticMeshesDirty_) {
+        traceCpu_.clear();
+        netHighlightCpu_.clear();
+    }
+    // (gate kept for the trace block below)
+    if (staticMeshesDirty_) (void)0;
+    for (const auto& t : M.traces) {
+        float tZBot = zBot, tH = h; bool tVis = true;
+        layerZ(t.layer, tZBot, tH, tVis);
+        if (!tVis) continue;
+        const auto pts = tracePolylinePoints(t);
+        if (pts.size() < 2) continue;
+        const QString tid = QString::fromStdString(t.id);
+        const SceneRef tref{QStringLiteral("trace"), tid, -1};
+        const bool highlighted =
+            (mode_ == Mode::CapMeasure && refInPick(tref, capPickA_)) ||
+            (mode_ == Mode::CapMeasure && refInPick(tref, capPickB_)) ||
+            (selection_ == tref) || refInSelections(tref);
+        const float zTop = tZBot + tH;        // top face — what we actually see in 2D top
+        const float w    = float(std::max(t.width, traceRenderWidthFloor_));
+
+        if (staticMeshesDirty_) {
+            // Bake into the layer's merged top-face mesh (selection-
+            // independent — highlights are overlay-only).
+            Mesh& dest = traceCpu_[t.layer];
+            // Also bake into the per-net mesh, so clicking any element
+            // makes the *whole net* light up as one object overlay.
+            Mesh* netDest = t.net.empty() ? nullptr : &netHighlightCpu_[t.net];
+            for (size_t i = 0; i + 1 < pts.size(); ++i) {
+                const double dx = pts[i+1].first - pts[i].first;
+                const double dy = pts[i+1].second - pts[i].second;
+                const double L  = std::hypot(dx, dy);
+                if (L < 1e-6) continue;
+                const double cx = (pts[i].first  + pts[i+1].first ) * 0.5;
+                const double cy = (pts[i].second + pts[i+1].second) * 0.5;
+                const double a  = std::atan2(dy, dx);
+                appendOrientedQuad(dest.vertices, dest.indices,
+                                   cx, cy, zTop, a, L, w);
+                if (netDest) {
+                    // Slightly raised Z so the overlay wins the depth test
+                    // when it's rendered above the layer mesh.
+                    appendOrientedQuad(netDest->vertices, netDest->indices,
+                                       cx, cy, zTop + 0.01, a, L, w);
+                }
+            }
+        }
+        if (!highlighted) continue;
+
+        // Highlighted trace — keep the original per-segment box batches so
+        // the user gets crisp "above-layer" feedback. These are few (one
+        // selection or pick at a time).
+        QColor c;
+        if      (mode_ == Mode::CapMeasure && refInPick(tref, capPickA_)) c = kCapPickA;
+        else if (mode_ == Mode::CapMeasure && refInPick(tref, capPickB_)) c = kCapPickB;
+        else                                                              c = kTraceSelect;
+        const float zCenter = tZBot + tH * 0.5f;
+        for (size_t i = 0; i + 1 < pts.size(); ++i) {
+            const double dx = pts[i+1].first - pts[i].first;
+            const double dy = pts[i+1].second - pts[i].second;
+            const double L  = std::hypot(dx, dy);
+            if (L < 1e-6) continue;
+            const double angle = std::atan2(dy, dx);
+            Batch b; b.mesh = &meshBox_;
+            QMatrix4x4 m;
+            m.translate(float((pts[i].first + pts[i+1].first) * 0.5),
+                        float((pts[i].second + pts[i+1].second) * 0.5), zCenter);
+            m.rotate(float(angle * 180.0 / std::numbers::pi), QVector3D(0, 0, 1));
+            m.scale(float(L), w, tH);
+            b.model = m; b.color = c; b.ref = tref;
+            batches_.push_back(b);
+        }
+        if (pts.size() > 2) {
+            for (const auto& [px, py] : pts) {
+                Batch b; b.mesh = &meshCylinder_;
+                QMatrix4x4 m;
+                m.translate(float(px), float(py), tZBot);
+                m.scale(w * 0.5f, w * 0.5f, tH);
+                b.model = m; b.color = c; b.ref = tref;
+                batches_.push_back(b);
+            }
+        }
+        // Waypoint handles when trace is selected in EditTrace mode
+        if (mode_ == Mode::EditTrace && selection_ == tref) {
+            const float zHandle = zBot + h + 0.4f;
+            const float r = std::max(0.5f, w * 0.9f);
+            for (size_t i = 0; i < t.waypoints.size(); ++i) {
+                Batch b; b.mesh = &meshSphere_;
+                QMatrix4x4 m;
+                m.translate(float(t.waypoints[i][0]), float(t.waypoints[i][1]), zHandle);
+                m.scale(r, r, r);
+                b.model = m; b.color = kWaypointHandle;
+                b.ref = {QStringLiteral("waypoint"), tid, int(i)};
+                batches_.push_back(b);
+            }
+        }
+    }
+    // Emit one batch per layer for the merged trace top-face mesh,
+    // honouring per-layer visibility (toggled via the Layers dock).
+    for (const auto& [layerId, mesh] : traceCpu_) {
+        if (mesh.vertices.empty()) continue;
+        float zb_ = 0, zh_ = 0; bool vis = true;
+        layerZ(layerId, zb_, zh_, vis);
+        if (!vis) continue;
+        Batch b;
+        b.mesh  = &traceMeshes_[layerId];
+        b.model = QMatrix4x4{};
+        b.color = layerId.empty() ? kTraceColor : colorForKicadLayer(layerId);
+        b.ref   = {};
+        batches_.push_back(b);
+    }
+    if (staticMeshesDirty_) mergedMeshesDirty_ = true;
+
+    // Zone FILLS: ear-clip triangulate each polygon, accumulating into one
+    // mesh PER COPPER LAYER so each layer renders with its own colour
+    // (F.Cu red, In1.Cu yellow, etc.) instead of a single uniform copper
+    // tone. Each zone's triangles go into the mesh keyed by zn.layerId.
+    if (staticMeshesDirty_) {
+        zoneFillsCpu_.clear();
+        for (const auto& zn : M.zones) {
+            if (zn.outline.size() < 3) continue;
+            float zoneBot = float(sensorBottomZ());
+            float zoneH   = float(sensorTopZ() - sensorBottomZ());
+            bool  zoneVis = true;
+            layerZ(zn.layerId, zoneBot, zoneH, zoneVis);
+            if (!zoneVis) continue;
+            const float zMid = zoneBot + zoneH * 0.5f;
+            const auto& poly = zn.outline;
+            const std::vector<int> tris = earClipTriangulate(poly);
+            Mesh& dest = zoneFillsCpu_[zn.layerId];
+            Mesh* netDest = zn.net.empty() ? nullptr : &netHighlightCpu_[zn.net];
+            if (!tris.empty()) {
+                const uint32_t baseIdx = uint32_t(dest.vertices.size());
+                for (const auto& p : poly) {
+                    dest.vertices.push_back({float(p[0]), float(p[1]), zMid, 0, 0, 1});
+                }
+                for (int t : tris) {
+                    dest.indices.push_back(baseIdx + uint32_t(t));
+                }
+                if (netDest) {
+                    const uint32_t netBase = uint32_t(netDest->vertices.size());
+                    for (const auto& p : poly) {
+                        netDest->vertices.push_back(
+                            {float(p[0]), float(p[1]), float(zMid + 0.01), 0, 0, 1});
+                    }
+                    for (int t : tris) {
+                        netDest->indices.push_back(netBase + uint32_t(t));
+                    }
+                }
+            } else {
+                // Final fallback only for triangulator giving up entirely
+                // (n > kHardCap). Render a bounding-box quad so the user
+                // still sees *something* rather than a ghost zone.
+                double xLo = poly[0][0], xHi = poly[0][0];
+                double yLo = poly[0][1], yHi = poly[0][1];
+                for (const auto& p : poly) {
+                    xLo = std::min(xLo, p[0]); xHi = std::max(xHi, p[0]);
+                    yLo = std::min(yLo, p[1]); yHi = std::max(yHi, p[1]);
+                }
+                const uint32_t b0 = uint32_t(dest.vertices.size());
+                dest.vertices.push_back({float(xLo), float(yLo), zMid, 0, 0, 1});
+                dest.vertices.push_back({float(xHi), float(yLo), zMid, 0, 0, 1});
+                dest.vertices.push_back({float(xHi), float(yHi), zMid, 0, 0, 1});
+                dest.vertices.push_back({float(xLo), float(yHi), zMid, 0, 0, 1});
+                dest.indices.push_back(b0); dest.indices.push_back(b0+1); dest.indices.push_back(b0+2);
+                dest.indices.push_back(b0); dest.indices.push_back(b0+2); dest.indices.push_back(b0+3);
+            }
+        }
+        zoneFillsDirty_ = true;
+    }
+    {
+        // One Batch per layer (cached). Tint with the layer colour,
+        // knocked back in saturation/alpha so it reads as "fill" not
+        // "trace". Runs every rebuild — emit is cheap.
+        for (const auto& [layerId, mesh] : zoneFillsCpu_) {
+            if (mesh.vertices.empty()) continue;
+            float zb_ = 0, zh_ = 0; bool vis = true;
+            layerZ(layerId, zb_, zh_, vis);
+            if (!vis) continue;
+            Batch b;
+            b.mesh  = &zoneFillMeshes_[layerId];   // stable pointer (std::map)
+            b.model = QMatrix4x4{};
+            QColor c = colorForKicadLayer(layerId);
+            // Soften the layer colour for fill: lower saturation, semi-trans.
+            // (Use distinct names from the outer `h`/`a`/`v` floats above.)
+            int hH, hS, hV, hA;
+            c.getHsv(&hH, &hS, &hV, &hA);
+            c.setHsv(hH, std::max(0, hS - 40), std::min(255, hV + 10), 200);
+            b.color = c;
+            b.ref = {};
+            batches_.push_back(b);
+        }
+    }
+
+    // Zone outlines — merged per-layer baking. KiCad ground planes can have
+    // hundreds of vertices each, multiplied by tens of zones, easily 30k+
+    // edges on a 4-layer board. Rendered individually that's the dominant
+    // perf cost; merged it's one draw per layer. Highlighted zones (in
+    // CapMeasure / selection) still get individual outline batches so they
+    // visually pop above the merged mesh.
+    if (staticMeshesDirty_) zoneOutlineCpu_.clear();
+    {
+        const float lineW = 0.15f;        // visual outline thickness in mm
+        for (const auto& zn : M.zones) {
+            float zoneBot = float(sensorBottomZ());
+            float zoneH   = float(sensorTopZ() - sensorBottomZ());
+            bool  zoneVis = true;
+            layerZ(zn.layerId, zoneBot, zoneH, zoneVis);
+            if (!zoneVis) continue;
+            const float zTop      = zoneBot + zoneH;        // top face for 2D readability
+            const float zoneCenter = zoneBot + zoneH * 0.5f;
+            const SceneRef zref{QStringLiteral("zone"), QString::fromStdString(zn.id), -1};
+            const bool highlighted =
+                (mode_ == Mode::CapMeasure && refInPick(zref, capPickA_)) ||
+                (mode_ == Mode::CapMeasure && refInPick(zref, capPickB_)) ||
+                (selection_ == zref) || refInSelections(zref);
+            const auto& pts = zn.outline;
+            const size_t n = pts.size();
+            if (n < 2) continue;
+
+            if (staticMeshesDirty_) {
+                Mesh& dest = zoneOutlineCpu_[zn.layerId];
+                Mesh* netDest = zn.net.empty() ? nullptr : &netHighlightCpu_[zn.net];
+                for (size_t i = 0; i < n; ++i) {
+                    const auto& p0 = pts[i];
+                    const auto& p1 = pts[(i + 1) % n];
+                    const double dx = p1[0] - p0[0];
+                    const double dy = p1[1] - p0[1];
+                    const double L  = std::hypot(dx, dy);
+                    if (L < 1e-9) continue;
+                    const double cx = (p0[0] + p1[0]) * 0.5;
+                    const double cy = (p0[1] + p1[1]) * 0.5;
+                    const double a  = std::atan2(dy, dx);
+                    appendOrientedQuad(dest.vertices, dest.indices,
+                                       cx, cy, zTop, a, L, lineW);
+                    if (netDest) {
+                        // Outline gets a slightly thicker overlay so it
+                        // reads as the "selected" line above the bake.
+                        appendOrientedQuad(netDest->vertices, netDest->indices,
+                                           cx, cy, zTop + 0.01, a, L,
+                                           double(lineW) * 2.0);
+                    }
+                }
+            }
+            if (!highlighted) continue;
+
+            // Highlighted — keep per-edge box batches.
+            QColor col;
+            if      (mode_ == Mode::CapMeasure && refInPick(zref, capPickA_)) col = kCapPickA;
+            else if (mode_ == Mode::CapMeasure && refInPick(zref, capPickB_)) col = kCapPickB;
+            else                                                              col = kTraceSelect;
+            for (size_t i = 0; i < n; ++i) {
+                const auto& p0 = pts[i];
+                const auto& p1 = pts[(i + 1) % n];
+                const double dx = p1[0] - p0[0];
+                const double dy = p1[1] - p0[1];
+                const double L  = std::hypot(dx, dy);
+                if (L < 1e-9) continue;
+                const double angle = std::atan2(dy, dx);
+                Batch bz; bz.mesh = &meshBox_;
+                QMatrix4x4 mz;
+                mz.translate(float((p0[0] + p1[0]) * 0.5),
+                             float((p0[1] + p1[1]) * 0.5), zoneCenter);
+                mz.rotate(float(angle * 180.0 / std::numbers::pi), QVector3D(0, 0, 1));
+                mz.scale(float(L), lineW, zoneH);
+                bz.model = mz; bz.color = col; bz.ref = zref;
+                batches_.push_back(bz);
+            }
+        }
+    }
+    // Emit one batch per layer for the merged zone-outline top-face mesh,
+    // honouring per-layer visibility.
+    for (const auto& [layerId, mesh] : zoneOutlineCpu_) {
+        if (mesh.vertices.empty()) continue;
+        float zb_ = 0, zh_ = 0; bool vis = true;
+        layerZ(layerId, zb_, zh_, vis);
+        if (!vis) continue;
+        Batch b;
+        b.mesh  = &zoneOutlineMeshes_[layerId];
+        b.model = QMatrix4x4{};
+        b.color = kZoneColor;
+        b.ref   = {};
+        batches_.push_back(b);
+    }
+
+    for (const auto& f : M.fpcPads) {
+        Batch b; b.mesh = &meshBox_;
+        QMatrix4x4 m;
+        m.translate(float(f.x), float(f.y), zBot + h * 0.5f);
+        m.scale(float(f.width), float(f.height), h);
+        b.model = m;
+        const QString fid = QString::fromStdString(f.id);
+        b.ref = {QStringLiteral("fpc"), fid, -1};
+        if      (mode_ == Mode::CapMeasure && refInPick(b.ref, capPickA_)) b.color = kCapPickA;
+        else if (mode_ == Mode::CapMeasure && refInPick(b.ref, capPickB_)) b.color = kCapPickB;
+        else if (selection_ == b.ref) b.color = kFpcSelect;
+        else                          b.color = kFpcColor;
+        batches_.push_back(b);
+    }
+
+    // Trace draft preview (only in AddTrace mode while drafting)
+    if (traceDraft_) {
+        std::vector<std::pair<double, double>> pts;
+        if (auto p = std::find_if(M.pads.begin(), M.pads.end(),
+                                  [&](const ccc::core::Pad& pp){ return QString::fromStdString(pp.id) == traceDraft_->fromId; });
+            p != M.pads.end()) {
+            pts.emplace_back(p->x, p->y);
+        }
+        for (const auto& w : traceDraft_->waypoints) pts.emplace_back(w);
+        if (traceDraft_->hasCursor) pts.emplace_back(traceDraft_->cursorX, traceDraft_->cursorY);
+        if (pts.size() >= 2) {
+            const float zCenter = zBot + h * 0.5f + 0.05f; // a hair above sensor
+            const float w = 0.3f;
+            for (size_t i = 0; i + 1 < pts.size(); ++i) {
+                const double dx = pts[i+1].first - pts[i].first;
+                const double dy = pts[i+1].second - pts[i].second;
+                const double L  = std::hypot(dx, dy);
+                if (L < 1e-6) continue;
+                Batch b; b.mesh = &meshBox_;
+                QMatrix4x4 m;
+                m.translate(float((pts[i].first + pts[i+1].first) * 0.5),
+                            float((pts[i].second + pts[i+1].second) * 0.5), zCenter);
+                m.rotate(float(std::atan2(dy, dx) * 180.0 / std::numbers::pi), QVector3D(0,0,1));
+                m.scale(float(L), w, h);
+                b.model = m; b.color = kDraftLine;
+                batches_.push_back(b);
+            }
+            for (size_t i = 1; i < pts.size(); ++i) {  // skip the from-pad anchor
+                Batch b; b.mesh = &meshSphere_;
+                QMatrix4x4 m;
+                m.translate(float(pts[i].first), float(pts[i].second), zCenter + 0.2f);
+                m.scale(0.45f, 0.45f, 0.45f);
+                b.model = m; b.color = kWaypointHandle;
+                batches_.push_back(b);
+            }
+        }
+    }
+    // Per-net overlay: clicking any element of a net lights up the WHOLE
+    // net as one object. The mesh is built once at static-bake time
+    // (above), so this is a single draw call regardless of net size.
+    {
+        std::string net = netForRef(selection_);
+        for (const auto& s : selections_) {
+            if (!net.empty()) break;
+            net = netForRef(s);
+        }
+        // Cap-pick A/B also light up their nets, in distinct colours.
+        auto firstPickRef = [](const CapPick& cp) -> SceneRef {
+            if (!cp.padIds.empty())   return {QStringLiteral("pad"),   cp.padIds.front(),   -1};
+            if (!cp.traceIds.empty()) return {QStringLiteral("trace"), cp.traceIds.front(), -1};
+            if (!cp.zoneIds.empty())  return {QStringLiteral("zone"),  cp.zoneIds.front(),  -1};
+            return {};
+        };
+        const std::string netA = netForRef(firstPickRef(capPickA_));
+        const std::string netB = netForRef(firstPickRef(capPickB_));
+        highlightedNet_ = net;
+        auto emitNet = [&](const std::string& n, const QColor& col) {
+            if (n.empty()) return;
+            auto it = netHighlightCpu_.find(n);
+            if (it == netHighlightCpu_.end() || it->second.vertices.empty()) return;
+            Batch b;
+            b.mesh  = &netHighlightMeshes_[n];
+            b.model = QMatrix4x4{};
+            b.color = col;
+            b.ref   = {};
+            batches_.push_back(b);
+        };
+        if (mode_ == Mode::CapMeasure) {
+            emitNet(netA, kCapPickA);
+            emitNet(netB, kCapPickB);
+        }
+        if (!net.empty() && net != netA && net != netB) {
+            emitNet(net, kTraceSelect);
+        }
+    }
+
+    // We've baked everything that needed baking. Flip the dirty flag so
+    // subsequent rebuildBatches calls (selection / hover / mode change) only
+    // re-emit batches over the cached meshes instead of re-walking thousands
+    // of segments and re-uploading megabytes to the GPU.
+    staticMeshesDirty_ = false;
+}
+
+void Viewport3D::setLayerVisible(const QString& id, bool visible) {
+    if (!model_) return;
+    if (id == QLatin1String("glass")) model_->glass.visible = visible;
+    else if (auto* l = model_->findLayer(id.toStdString())) l->visible = visible;
+    rebuildBatches(); update();
+}
+
+void Viewport3D::fitView() {
+    if (!model_) return;
+    const float r = std::max(float(model_->glass.width), float(model_->glass.height)) * 0.6f;
+    camera_.fit(QVector3D(0, 0, 0), r); update();
+}
+void Viewport3D::presetIso()   { camera_.setPresetIso();   update(); }
+void Viewport3D::presetTop()   { camera_.setPresetTop();   update(); }
+void Viewport3D::presetFront() { camera_.setPresetFront(); update(); }
+void Viewport3D::presetSide()  { camera_.setPresetSide();  update(); }
+
+// ============================================================================
+//  Picking — analytic on the sensor XY plane
+// ============================================================================
+bool Viewport3D::screenToSensorXY(QPoint px, double& outX, double& outY) const {
+    const float aspect = float(width()) / std::max(1, height());
+    const QMatrix4x4 invVP = (camera_.projectionMatrix(aspect) * camera_.viewMatrix()).inverted();
+    const float ndcX = float(px.x()) / std::max(1, width()) * 2.0f - 1.0f;
+    const float ndcY = 1.0f - float(px.y()) / std::max(1, height()) * 2.0f;
+    const QVector4D nearH = invVP * QVector4D(ndcX, ndcY, -1.0f, 1.0f);
+    const QVector4D farH  = invVP * QVector4D(ndcX, ndcY,  1.0f, 1.0f);
+    if (nearH.w() == 0 || farH.w() == 0) return false;
+    const QVector3D pNear = nearH.toVector3DAffine();
+    const QVector3D pFar  = farH.toVector3DAffine();
+    const QVector3D dir = (pFar - pNear);
+    const float planeZ = float((sensorTopZ() + sensorBottomZ()) * 0.5);
+    if (std::abs(dir.z()) < 1e-9f) return false;
+    const float t = (planeZ - pNear.z()) / dir.z();
+    if (t < 0.0f) return false;
+    const QVector3D hit = pNear + dir * t;
+    outX = hit.x(); outY = hit.y();
+    return true;
+}
+
+SceneRef Viewport3D::pickAt(QPoint px) const {
+    double x, y;
+    if (!model_ || !screenToSensorXY(px, x, y)) return {};
+
+    // Waypoint handles take priority when the corresponding trace is selected
+    if (mode_ == Mode::EditTrace && selection_.kind == QLatin1String("trace")) {
+        for (const auto& t : model_->traces) {
+            if (QString::fromStdString(t.id) != selection_.id) continue;
+            const double r = std::max(0.5, t.width * 0.9);
+            for (size_t i = 0; i < t.waypoints.size(); ++i) {
+                const double dx = x - t.waypoints[i][0], dy = y - t.waypoints[i][1];
+                if (dx*dx + dy*dy <= r * r * 4.0) {  // generous: 2r grab radius
+                    return {QStringLiteral("waypoint"), QString::fromStdString(t.id), int(i)};
+                }
+            }
+            break;
+        }
+    }
+
+    auto pointInPad = [&](const ccc::core::Pad& p) {
+        switch (p.shape) {
+            case ccc::core::PadShape::Circle: {
+                const double dx = x - p.x, dy = y - p.y;
+                return dx*dx + dy*dy <= (p.size * p.size * 0.25);
+            }
+            case ccc::core::PadShape::Square:
+                return std::abs(x - p.x) <= p.size * 0.5 && std::abs(y - p.y) <= p.size * 0.5;
+            case ccc::core::PadShape::Ellipse: {
+                const double rx = p.size * 0.5, ry = (p.size2 == 0 ? p.size : p.size2) * 0.5;
+                if (rx <= 0 || ry <= 0) return false;
+                const double dx = (x - p.x) / rx, dy = (y - p.y) / ry;
+                return dx*dx + dy*dy <= 1.0;
+            }
+            case ccc::core::PadShape::RoundedSquare: {
+                const double s = p.size * 0.5;
+                return std::abs(x - p.x) <= s && std::abs(y - p.y) <= s;
+            }
+        }
+        return false;
+    };
+    auto pointInFpc = [&](const ccc::core::FpcPad& f) {
+        return std::abs(x - f.x) <= f.width * 0.5 && std::abs(y - f.y) <= f.height * 0.5;
+    };
+    for (const auto& p : model_->pads)
+        if (pointInPad(p)) return {QStringLiteral("pad"), QString::fromStdString(p.id), -1};
+    for (const auto& f : model_->fpcPads)
+        if (pointInFpc(f)) return {QStringLiteral("fpc"), QString::fromStdString(f.id), -1};
+
+    auto segDist = [](double px2, double py2, double ax, double ay, double bx, double by) {
+        const double dx = bx - ax, dy = by - ay;
+        const double l2 = dx*dx + dy*dy;
+        if (l2 < 1e-12) return std::hypot(px2 - ax, py2 - ay);
+        double tt = ((px2 - ax) * dx + (py2 - ay) * dy) / l2;
+        tt = std::clamp(tt, 0.0, 1.0);
+        const double cx = ax + tt * dx, cy = ay + tt * dy;
+        return std::hypot(px2 - cx, py2 - cy);
+    };
+    for (const auto& t : model_->traces) {
+        const auto pts = tracePolylinePoints(t);
+        // Use the same visual floor for picking, so anything visible is also
+        // clickable (sub-um traces would otherwise be unreachable).
+        const double pickW = std::max(t.width, traceRenderWidthFloor_);
+        for (size_t i = 0; i + 1 < pts.size(); ++i) {
+            if (segDist(x, y, pts[i].first, pts[i].second, pts[i+1].first, pts[i+1].second) <= pickW * 0.5 + 0.05) {
+                return {QStringLiteral("trace"), QString::fromStdString(t.id), -1};
+            }
+        }
+    }
+    return {};
+}
+
+// ============================================================================
+//  Editing helpers
+// ============================================================================
+double Viewport3D::snapVal(double v) const {
+    if (!snapEnabled_) return v;
+    return std::round(v / snapSize_) * snapSize_;
+}
+std::pair<double, double> Viewport3D::snapPt(double x, double y) const {
+    return { snapVal(x), snapVal(y) };
+}
+
+// Snap the direction from (fromX, fromY) -> (toX, toY) to the nearest multiple
+// of 45 degrees, while preserving distance projected on the snapped axis. Then
+// apply the regular grid snap to the resulting endpoint.
+std::pair<double, double> Viewport3D::snap8Dir(double fromX, double fromY,
+                                               double toX,   double toY) const {
+    const double dx = toX - fromX;
+    const double dy = toY - fromY;
+    const double r  = std::sqrt(dx * dx + dy * dy);
+    if (r < 1e-9) return { fromX, fromY };
+    const double theta = std::atan2(dy, dx);
+    constexpr double step = 0.7853981633974483;          // pi / 4
+    const double snapped = std::round(theta / step) * step;
+    const double cx = fromX + r * std::cos(snapped);
+    const double cy = fromY + r * std::sin(snapped);
+    return snapPt(cx, cy);
+}
+
+// Anchor for trace-direction snapping: the last waypoint if any, else the
+// from-pad position. Returns false if neither can be resolved.
+bool Viewport3D::traceDraftAnchor(double& outX, double& outY) const {
+    if (!traceDraft_ || !model_) return false;
+    if (!traceDraft_->waypoints.empty()) {
+        outX = traceDraft_->waypoints.back().first;
+        outY = traceDraft_->waypoints.back().second;
+        return true;
+    }
+    for (const auto& p : model_->pads) {
+        if (QString::fromStdString(p.id) == traceDraft_->fromId) {
+            outX = p.x; outY = p.y; return true;
+        }
+    }
+    return false;
+}
+
+QString Viewport3D::nextPadId() const {
+    int n = 0;
+    if (model_) for (const auto& p : model_->pads) {
+        if (p.id.size() > 1 && p.id[0] == 'P') {
+            try { n = std::max(n, std::stoi(p.id.substr(1))); } catch (...) {}
+        }
+    }
+    return QStringLiteral("P%1").arg(n + 1);
+}
+QString Viewport3D::nextTraceId() const {
+    int n = 0;
+    if (model_) for (const auto& t : model_->traces) {
+        if (t.id.size() > 1 && t.id[0] == 'T') {
+            try { n = std::max(n, std::stoi(t.id.substr(1))); } catch (...) {}
+        }
+    }
+    return QStringLiteral("T%1").arg(n + 1);
+}
+
+void Viewport3D::addPadAt(double x, double y) {
+    if (!model_) return;
+    ccc::core::Pad p;
+    p.id    = nextPadId().toStdString();
+    p.x     = x;
+    p.y     = y;
+    p.shape = ccc::core::PadShape::Circle;
+    p.size  = 12.0;
+    p.size2 = 12.0;
+    const QString newId = QString::fromStdString(p.id);
+    model_->pads.push_back(std::move(p));
+    selection_ = {QStringLiteral("pad"), newId, -1};
+    emit selectionChanged(selection_);
+    emit modelEdited();
+    rebuildBatches();
+    update();
+}
+
+void Viewport3D::deleteSceneRef(const SceneRef& ref) {
+    if (!model_ || !ref.isValid()) return;
+    const std::string id = ref.id.toStdString();
+    if (ref.kind == QLatin1String("pad")) {
+        model_->pads.erase(std::remove_if(model_->pads.begin(), model_->pads.end(),
+            [&](const ccc::core::Pad& p){ return p.id == id; }), model_->pads.end());
+        model_->traces.erase(std::remove_if(model_->traces.begin(), model_->traces.end(),
+            [&](const ccc::core::Trace& t){ return t.from == id || t.to == id; }), model_->traces.end());
+    } else if (ref.kind == QLatin1String("trace")) {
+        model_->traces.erase(std::remove_if(model_->traces.begin(), model_->traces.end(),
+            [&](const ccc::core::Trace& t){ return t.id == id; }), model_->traces.end());
+    } else if (ref.kind == QLatin1String("fpc")) {
+        model_->fpcPads.erase(std::remove_if(model_->fpcPads.begin(), model_->fpcPads.end(),
+            [&](const ccc::core::FpcPad& f){ return f.id == id; }), model_->fpcPads.end());
+        model_->traces.erase(std::remove_if(model_->traces.begin(), model_->traces.end(),
+            [&](const ccc::core::Trace& t){ return t.from == id || t.to == id; }), model_->traces.end());
+    }
+    if (selection_ == ref || selection_.id == ref.id) {
+        selection_ = {};
+        emit selectionChanged(selection_);
+    }
+    emit modelEdited();
+    rebuildBatches();
+    update();
+}
+
+void Viewport3D::finalizeTraceTo(const SceneRef& target) {
+    if (!model_ || !traceDraft_) return;
+    if (target.kind == QLatin1String("pad") && target.id == traceDraft_->fromId) {
+        cancelTraceDraft();
+        return;
+    }
+    ccc::core::Trace t;
+    t.id    = nextTraceId().toStdString();
+    t.from  = traceDraft_->fromId.toStdString();
+    t.to    = target.id.toStdString();
+    t.width = 0.002;   // 2 um
+    for (const auto& w : traceDraft_->waypoints) t.waypoints.push_back({w.first, w.second});
+    const QString tid = QString::fromStdString(t.id);
+    model_->traces.push_back(std::move(t));
+    traceDraft_.reset();
+    selection_ = {QStringLiteral("trace"), tid, -1};
+    emit selectionChanged(selection_);
+    emit modelEdited();
+    rebuildBatches();
+    update();
+}
+void Viewport3D::cancelTraceDraft() {
+    if (!traceDraft_) return;
+    traceDraft_.reset();
+    rebuildBatches();
+    update();
+}
+
+void Viewport3D::insertWaypointAt(const QString& traceId, double x, double y) {
+    if (!model_) return;
+    auto it = std::find_if(model_->traces.begin(), model_->traces.end(),
+        [&](const ccc::core::Trace& t){ return QString::fromStdString(t.id) == traceId; });
+    if (it == model_->traces.end()) return;
+
+    // Find the segment in the full polyline (incl. endpoint anchors) closest
+    // to (x, y), then insert before that segment in the waypoints array.
+    const auto pts = tracePolylinePoints(*it);
+    double bestD = 1e30; size_t bestI = 0;
+    for (size_t i = 0; i + 1 < pts.size(); ++i) {
+        const double ax = pts[i].first,    ay = pts[i].second;
+        const double bx = pts[i + 1].first, by = pts[i + 1].second;
+        const double dx = bx - ax, dy = by - ay;
+        const double l2 = dx*dx + dy*dy;
+        double tt = (l2 < 1e-12) ? 0.0 : ((x - ax) * dx + (y - ay) * dy) / l2;
+        tt = std::clamp(tt, 0.0, 1.0);
+        const double cx = ax + tt * dx, cy = ay + tt * dy;
+        const double d  = std::hypot(x - cx, y - cy);
+        if (d < bestD) { bestD = d; bestI = i; }
+    }
+    auto [sx, sy] = snapPt(x, y);
+    it->waypoints.insert(it->waypoints.begin() + bestI, {sx, sy});
+    emit modelEdited();
+    rebuildBatches();
+    update();
+}
+
+void Viewport3D::setMode(Mode m) {
+    if (m == mode_) return;
+    cancelTraceDraft();
+    if (mode_ == Mode::CapMeasure || m == Mode::CapMeasure) {
+        capPickA_ = {};
+        capPickB_ = {};
+    }
+    mode_ = m;
+    rebuildBatches();
+    update();
+    emit modeChanged(int(m));
+}
+
+void Viewport3D::setViewMode(ViewMode v) {
+    if (v == viewMode_) return;
+    viewMode_ = v;
+    if (v == ViewMode::Two2D) {
+        // Lock to top-down ortho-feel view.
+        camera_.setPresetTop();
+    }
+    update();
+    emit viewModeChanged(int(v));
+}
+
+// ---------------------------------------------------------------------------
+//  Selection helpers
+// ---------------------------------------------------------------------------
+bool Viewport3D::refInSelections(const SceneRef& r) const {
+    if (!r.isValid()) return false;
+    for (const auto& s : selections_) if (s == r) return true;
+    return false;
+}
+
+void Viewport3D::finishMarqueeSelection() {
+    // Convert pixel rect to world XY rect on the sensor plane.
+    if (!model_) return;
+    double x0, y0, x1, y1;
+    if (!screenToSensorXY(marqueeStart_, x0, y0)) return;
+    if (!screenToSensorXY(marqueeEnd_,   x1, y1)) return;
+    if (x0 > x1) std::swap(x0, x1);
+    if (y0 > y1) std::swap(y0, y1);
+    selections_.clear();
+    auto add = [&](const SceneRef& r) { selections_.push_back(r); };
+    for (const auto& p : model_->pads) {
+        if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1)
+            add({QStringLiteral("pad"), QString::fromStdString(p.id), -1});
+    }
+    for (const auto& f : model_->fpcPads) {
+        if (f.x >= x0 && f.x <= x1 && f.y >= y0 && f.y <= y1)
+            add({QStringLiteral("fpc"), QString::fromStdString(f.id), -1});
+    }
+    // Traces: include if any waypoint is inside the rect (cheap heuristic).
+    for (const auto& t : model_->traces) {
+        const auto pts = tracePolylinePoints(t);
+        for (const auto& [px, py] : pts) {
+            if (px >= x0 && px <= x1 && py >= y0 && py <= y1) {
+                add({QStringLiteral("trace"), QString::fromStdString(t.id), -1});
+                break;
+            }
+        }
+    }
+    if (!selections_.empty()) {
+        selection_ = selections_.front();
+        emit selectionChanged(selection_);
+    }
+}
+
+void Viewport3D::drawMarqueeOverlay() {
+    // Drawing the marquee rectangle would require a separate 2D pass with a
+    // QPainter or extra GL state. For now we just trigger a repaint on
+    // mouseMove and let the user release to commit the selection. Visual
+    // marquee feedback can be added later without touching call sites.
+}
+
+// ---------------------------------------------------------------------------
+//  Per-mode press dispatchers
+// ---------------------------------------------------------------------------
+bool Viewport3D::handlePressSelect(QMouseEvent* ev, const SceneRef& hit,
+                                   double /*wx*/, double /*wy*/, bool /*xyValid*/) {
+    const bool ctrl = (ev->modifiers() & Qt::ControlModifier) != 0;
+    if (hit.isValid()) {
+        if (ctrl) {
+            // Toggle into multi-selection.
+            auto it = std::find(selections_.begin(), selections_.end(), hit);
+            if (it == selections_.end()) selections_.push_back(hit);
+            else                          selections_.erase(it);
+            selection_ = selections_.empty() ? SceneRef{} : selections_.back();
+        } else {
+            selections_.clear();
+            selection_ = hit;
+        }
+        emit selectionChanged(selection_);
+        rebuildBatches();
+        update();
+        return true;
+    }
+    // LMB on empty background — start a marquee.
+    marqueeActive_ = true;
+    marqueeStart_  = ev->pos();
+    marqueeEnd_    = ev->pos();
+    marqueeMoved_  = false;
+    if (!ctrl) {
+        selections_.clear();
+        if (selection_.isValid()) {
+            selection_ = {};
+            emit selectionChanged(selection_);
+        }
+        rebuildBatches();
+        update();
+    }
+    return true;
+}
+
+bool Viewport3D::handlePressAddPad(QMouseEvent*, double wx, double wy, bool xyValid) {
+    if (!xyValid || !model_) return false;
+    addPadAt(wx, wy);
+    emit modelEdited();
+    return true;
+}
+
+bool Viewport3D::handlePressDelete(QMouseEvent*, const SceneRef& hit) {
+    if (!hit.isValid() || !model_) return false;
+    deleteSceneRef(hit);
+    selection_ = {};
+    emit selectionChanged(selection_);
+    emit modelEdited();
+    return true;
+}
+
+bool Viewport3D::handlePressAddTrace(QMouseEvent*, const SceneRef& hit,
+                                     double wx, double wy, bool xyValid) {
+    if (!model_) return false;
+    if (hit.kind == QLatin1String("pad")) {
+        if (!traceDraft_) {
+            traceDraft_.emplace();
+            traceDraft_->fromId = hit.id;
+        } else {
+            finalizeTraceTo(hit);
+            return true;
+        }
+    } else if (hit.kind == QLatin1String("fpc")) {
+        if (traceDraft_) finalizeTraceTo(hit);
+    } else if (xyValid && traceDraft_) {
+        const auto snapped = snapPt(wx, wy);
+        traceDraft_->waypoints.emplace_back(snapped.first, snapped.second);
+    }
+    rebuildBatches();
+    update();
+    return true;
+}
+
+bool Viewport3D::handlePressEditTrace(QMouseEvent*, const SceneRef& hit,
+                                      double wx, double wy, bool xyValid) {
+    if (!model_) return false;
+    if (hit.kind == QLatin1String("waypoint")) {
+        // Begin dragging this waypoint.
+        dragging_  = true;
+        dragRef_   = hit;
+        dragOffsetX_ = 0;
+        dragOffsetY_ = 0;
+        return true;
+    }
+    if (hit.kind == QLatin1String("trace")) {
+        selection_ = hit;
+        emit selectionChanged(selection_);
+        rebuildBatches();
+        update();
+        return true;
+    }
+    // Click on background while a trace is selected -> insert a waypoint.
+    if (xyValid && selection_.kind == QLatin1String("trace")) {
+        insertWaypointAt(selection_.id, wx, wy);
+        emit modelEdited();
+        return true;
+    }
+    return false;
+}
+
+bool Viewport3D::handlePressMoveFpc(QMouseEvent*, const SceneRef& hit,
+                                    double wx, double wy, bool /*xyValid*/) {
+    if (!model_) return false;
+    if (hit.kind != QLatin1String("fpc")) return false;
+    dragging_ = true;
+    dragRef_  = hit;
+    // Stash the click-relative offset so the FPC doesn't snap its centre to
+    // the cursor on first move.
+    for (const auto& f : model_->fpcPads) {
+        if (QString::fromStdString(f.id) == hit.id) {
+            dragOffsetX_ = wx - f.x;
+            dragOffsetY_ = wy - f.y;
+            break;
+        }
+    }
+    selection_ = hit;
+    emit selectionChanged(selection_);
+    rebuildBatches();
+    update();
+    return true;
+}
+
+bool Viewport3D::handlePressCapMeasure(QMouseEvent* ev, const SceneRef& hit) {
+    if (!hit.isValid() || !model_) return false;
+    const bool isB = (ev->modifiers() & Qt::ShiftModifier) != 0;
+    auto pick = findConductorOf(hit);
+    if (isB) capPickB_ = pick;
+    else     capPickA_ = pick;
+    rebuildBatches();
+    update();
+    // Route to the net dialog as soon as we have at least one pick — the
+    // dialog reads model.pads/traces/zones via net so a single pick is
+    // enough to populate Net A.
+    selection_ = hit;
+    emit selectionChanged(selection_);
+    if (!capPickA_.empty() && !capPickB_.empty()) emit capacitanceRequested();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+//  Mouse / wheel / key event overrides
+// ---------------------------------------------------------------------------
+void Viewport3D::mousePressEvent(QMouseEvent* ev) {
+    setFocus(Qt::MouseFocusReason);
+    activeBtn_         = ev->button();
+    lastMouseScreen_   = ev->pos();
+    dragging_          = false;
+    marqueeActive_     = false;
+
+    // RMB: pan (always in 2D; orbit-or-pan based on mode in 3D).
+    if (ev->button() == Qt::RightButton) {
+        return;     // actual movement handled in mouseMoveEvent
+    }
+    // MMB: pan in both modes.
+    if (ev->button() == Qt::MiddleButton) {
+        return;
+    }
+    if (ev->button() != Qt::LeftButton) return;
+
+    const SceneRef hit = pickAt(ev->pos());
+    double wx = 0, wy = 0;
+    const bool xyValid = screenToSensorXY(ev->pos(), wx, wy);
+    switch (mode_) {
+        case Mode::Select:     handlePressSelect    (ev, hit, wx, wy, xyValid); break;
+        case Mode::AddPad:     handlePressAddPad    (ev,      wx, wy, xyValid); break;
+        case Mode::DeletePad:  handlePressDelete    (ev, hit);                  break;
+        case Mode::AddTrace:   handlePressAddTrace  (ev, hit, wx, wy, xyValid); break;
+        case Mode::EditTrace:  handlePressEditTrace (ev, hit, wx, wy, xyValid); break;
+        case Mode::MoveFpc:    handlePressMoveFpc   (ev, hit, wx, wy, xyValid); break;
+        case Mode::CapMeasure: handlePressCapMeasure(ev, hit);                  break;
+    }
+}
+
+void Viewport3D::mouseMoveEvent(QMouseEvent* ev) {
+    const QPoint pos    = ev->pos();
+    const QPoint delta  = pos - lastMouseScreen_;
+    lastMouseScreen_    = pos;
+
+    // Status-bar cursor readout.
+    double wx = 0, wy = 0;
+    if (screenToSensorXY(pos, wx, wy)) emit cursorMoved(wx, wy);
+
+    // Right-button drag: pan (always) or orbit (3D only when no Ctrl held).
+    if (activeBtn_ == Qt::RightButton) {
+        if (viewMode_ == ViewMode::Three3D &&
+            (ev->modifiers() & Qt::ControlModifier) == 0) {
+            // 3D orbit: yaw uses -delta.x (mouse drag right rotates the
+            // scene clockwise as seen from above), pitch uses +delta.y.
+            // Calibrated against user feedback: 3D vertical OK with +,
+            // 3D horizontal needed flipping.
+            camera_.orbit(-float(delta.x()) * 0.4f, float(delta.y()) * 0.4f);
+        } else {
+            camera_.pan(float(delta.x()), float(delta.y()), height());
+        }
+        update();
+        return;
+    }
+    if (activeBtn_ == Qt::MiddleButton) {
+        camera_.pan(float(delta.x()), float(delta.y()), height());
+        update();
+        return;
+    }
+
+    // Marquee rectangle in Select mode.
+    if (marqueeActive_) {
+        marqueeEnd_ = pos;
+        if (!marqueeMoved_ &&
+            (std::abs(pos.x() - marqueeStart_.x()) > 3 ||
+             std::abs(pos.y() - marqueeStart_.y()) > 3)) {
+            marqueeMoved_ = true;
+        }
+        update();
+        return;
+    }
+
+    // Dragging a waypoint or FPC.
+    if (dragging_ && dragRef_.isValid() && model_) {
+        if (dragRef_.kind == QLatin1String("waypoint")) {
+            for (auto& t : model_->traces) {
+                if (QString::fromStdString(t.id) != dragRef_.id) continue;
+                if (dragRef_.sub < 0 || dragRef_.sub >= int(t.waypoints.size())) break;
+                const auto snapped = snapPt(wx, wy);
+                t.waypoints[dragRef_.sub] = {snapped.first, snapped.second};
+                emit modelEdited();
+                rebuildBatches();
+                update();
+                break;
+            }
+            return;
+        }
+        if (dragRef_.kind == QLatin1String("fpc")) {
+            for (auto& f : model_->fpcPads) {
+                if (QString::fromStdString(f.id) != dragRef_.id) continue;
+                f.x = wx - dragOffsetX_;
+                f.y = wy - dragOffsetY_;
+                emit modelEdited();
+                rebuildBatches();
+                update();
+                break;
+            }
+            return;
+        }
+    }
+
+    // Hover highlight (Select mode only, no buttons held).
+    if (mode_ == Mode::Select && activeBtn_ == Qt::NoButton) {
+        const SceneRef h = pickAt(pos);
+        if (h != hover_) {
+            hover_ = h;
+            rebuildBatches();
+            update();
+        }
+    }
+
+    // Live preview cursor for AddTrace draft.
+    if (mode_ == Mode::AddTrace && traceDraft_) {
+        traceDraft_->hasCursor = true;
+        traceDraft_->cursorX   = wx;
+        traceDraft_->cursorY   = wy;
+        rebuildBatches();
+        update();
+    }
+}
+
+void Viewport3D::mouseReleaseEvent(QMouseEvent* ev) {
+    if (marqueeActive_ && ev->button() == Qt::LeftButton) {
+        marqueeActive_ = false;
+        if (marqueeMoved_) {
+            finishMarqueeSelection();
+            rebuildBatches();
+            update();
+        }
+        marqueeMoved_ = false;
+    }
+    if (dragging_) {
+        dragging_ = false;
+        dragRef_  = {};
+    }
+    activeBtn_ = Qt::NoButton;
+}
+
+void Viewport3D::wheelEvent(QWheelEvent* ev) {
+    // 120-unit detent per notch on a typical mouse wheel.
+    const float steps = float(ev->angleDelta().y()) / 120.0f;
+    if (steps == 0.0f) return;
+    camera_.zoom(steps);
+    update();
+}
+

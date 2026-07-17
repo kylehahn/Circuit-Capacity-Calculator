@@ -15,6 +15,7 @@
       ]
     },
     "eigen3",
+    "clipper2",
     "nlohmann-json",
     "tinygltf",
     {

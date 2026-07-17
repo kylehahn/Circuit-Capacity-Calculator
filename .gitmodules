@@ -1,0 +1,3 @@
+[submodule "external/downloads/FastCap2-WRCad"]
+	path = external/downloads/FastCap2-WRCad
+	url = https://github.com/ediloren/FastCap2.git

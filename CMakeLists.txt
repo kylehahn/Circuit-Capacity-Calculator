@@ -49,10 +49,29 @@ endif()
 # --- Dependencies (resolved by vcpkg manifest) -----------------------------
 find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Concurrent)
 find_package(Eigen3 CONFIG REQUIRED)
+find_package(Clipper2 CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 # tinygltf is header-only — no CMake config package, just an include path.
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h" REQUIRED)
 find_package(OpenMP)
+
+# --- Optional GPU (cuSOLVER) for the dense LU ------------------------------
+# CUDA Toolkit must be installed separately; vcpkg does not ship it.
+# Pass -DCCC_ENABLE_CUDA=ON at configure to opt in.
+option(CCC_ENABLE_CUDA "Enable CUDA cuSOLVER GPU solve path" OFF)
+if(CCC_ENABLE_CUDA)
+    find_package(CUDAToolkit)
+    if(CUDAToolkit_FOUND)
+        message(STATUS "  CUDA       ${CUDAToolkit_VERSION} (cuSOLVER available)")
+        set(CCC_HAS_CUDA TRUE)
+    else()
+        message(WARNING "CCC_ENABLE_CUDA=ON but CUDA Toolkit not found; "
+                        "falling back to CPU-only build.")
+        set(CCC_HAS_CUDA FALSE)
+    endif()
+else()
+    set(CCC_HAS_CUDA FALSE)
+endif()
 
 # --- Targets ---------------------------------------------------------------
 add_subdirectory(src)

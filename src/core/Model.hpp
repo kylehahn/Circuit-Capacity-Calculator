@@ -6,6 +6,7 @@
 #include "Meta.hpp"
 #include "Pad.hpp"
 #include "Trace.hpp"
+#include "Zone.hpp"
 
 #include <string_view>
 #include <vector>
@@ -22,6 +23,7 @@ struct Model {
     std::vector<Pad> pads;
     std::vector<FpcPad> fpcPads;
     std::vector<Trace> traces;
+    std::vector<Zone> zones;     // copper pours (KiCad-imported)
 
     bool operator==(const Model&) const = default;
 

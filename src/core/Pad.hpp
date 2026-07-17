@@ -36,6 +36,11 @@ struct Pad {
     PadShape shape = PadShape::Circle;
     double size = 6.0;
     double size2 = 6.0;
+    // Net membership (for KiCad-imported designs). Empty means "no net info"
+    // and falls back to topology-based connectivity in cap measurements.
+    std::string net;
+    // Copper layer this pad lives on (e.g. "F.Cu"). Empty = sensor layer.
+    std::string layer;
 
     bool operator==(const Pad&) const = default;
 };

@@ -8,10 +8,11 @@ namespace ccc::core {
 
 std::vector<Layer> Model::defaultLayers() {
     return {
-        {"shield",    "Shield",          0.05, "#f0a040", 0.85, true},
-        {"inorganic", "Inorganic layer", 0.10, "#a0a0a0", 0.75, true},
-        {"sensor",    "Sensor / Trace",  0.05, "#3a3a3a", 1.00, true},
-        {"organic",   "Organic layer",   0.10, "#d0d4dc", 0.45, true},
+        // id          name                thick  color       opa   vis    cond   eps_r
+        {"shield",    "Shield",          0.05, "#f0a040", 0.85, true,  true,  1.0},
+        {"inorganic", "Inorganic layer", 0.10, "#a0a0a0", 0.75, true,  false, 7.0},
+        {"sensor",    "Sensor / Trace",  0.05, "#3a3a3a", 1.00, true,  true,  1.0},
+        {"organic",   "Organic layer",   0.10, "#d0d4dc", 0.45, true,  false, 3.5},
     };
 }
 
@@ -32,7 +33,7 @@ Model Model::generateGrid(int cols, int rows, double padDia, double pitch) {
     const double startY = sensorAreaCenterY - ((rows - 1) * pitch) / 2.0;
 
     Model m;
-    m.glass = {glassW, glassH, 5.0, "#bcdde8", 0.30, true};
+    m.glass = {glassW, glassH, 5.0, "#bcdde8", 0.30, true, 7.0};
     m.layers = defaultLayers();
 
     // Pads: row-major grid, ids "P1" .. "P{cols*rows}"
@@ -104,7 +105,7 @@ Model Model::generateGrid(int cols, int rows, double padDia, double pitch) {
         t.id    = "T" + std::to_string(i + 1);
         t.from  = p.id;
         t.to    = f.id;
-        t.width = 0.4;
+        t.width = 0.002;   // 2 um
         t.waypoints = {
             {dropX, p.y},
             {dropX, chY},

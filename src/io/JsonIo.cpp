@@ -31,30 +31,35 @@ void to_json(nlohmann::json& j, const GlassPlate& g) {
     j = {
         {"width", g.width}, {"height", g.height}, {"thickness", g.thickness},
         {"color", g.color}, {"opacity", g.opacity}, {"visible", g.visible},
+        {"permittivity", g.permittivity},
     };
 }
 void from_json(const nlohmann::json& j, GlassPlate& g) {
-    g.width     = j.value("width", 50.0);
-    g.height    = j.value("height", 60.0);
-    g.thickness = j.value("thickness", 5.0);
-    g.color     = j.value("color", std::string{"#bcdde8"});
-    g.opacity   = j.value("opacity", 0.30);
-    g.visible   = j.value("visible", true);
+    g.width        = j.value("width", 50.0);
+    g.height       = j.value("height", 60.0);
+    g.thickness    = j.value("thickness", 5.0);
+    g.color        = j.value("color", std::string{"#bcdde8"});
+    g.opacity      = j.value("opacity", 0.30);
+    g.visible      = j.value("visible", true);
+    g.permittivity = j.value("permittivity", 7.0);
 }
 
 void to_json(nlohmann::json& j, const Layer& l) {
     j = {
         {"id", l.id}, {"name", l.name}, {"thickness", l.thickness},
         {"color", l.color}, {"opacity", l.opacity}, {"visible", l.visible},
+        {"isConductor", l.isConductor}, {"permittivity", l.permittivity},
     };
 }
 void from_json(const nlohmann::json& j, Layer& l) {
-    l.id        = j.at("id").get<std::string>();
-    l.name      = j.value("name", l.id);
-    l.thickness = j.value("thickness", 0.05);
-    l.color     = j.value("color", std::string{"#888888"});
-    l.opacity   = j.value("opacity", 1.0);
-    l.visible   = j.value("visible", true);
+    l.id          = j.at("id").get<std::string>();
+    l.name        = j.value("name", l.id);
+    l.thickness   = j.value("thickness", 0.05);
+    l.color       = j.value("color", std::string{"#888888"});
+    l.opacity     = j.value("opacity", 1.0);
+    l.visible     = j.value("visible", true);
+    l.isConductor = j.value("isConductor", false);
+    l.permittivity = j.value("permittivity", 1.0);
 }
 
 void to_json(nlohmann::json& j, const Pad& p) {
@@ -93,7 +98,7 @@ void from_json(const nlohmann::json& j, Trace& t) {
     t.id        = j.at("id").get<std::string>();
     t.from      = j.at("from").get<std::string>();
     t.to        = j.at("to").get<std::string>();
-    t.width     = j.value("width", 0.4);
+    t.width     = j.value("width", 0.002);
     t.waypoints = j.value("waypoints", std::vector<Point2>{});
 }
 

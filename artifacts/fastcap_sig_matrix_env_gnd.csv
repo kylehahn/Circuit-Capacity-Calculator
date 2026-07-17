@@ -1,0 +1,2 @@
+solver,net_a,net_b,panels_a,panels_b,cm_f,cm_pf,assemble_ms,solve_ms,iters_a,iters_b,residual_a,residual_b
+fastcap,/SIG1,/SIG2,137,137,4.096e-16,0.0004096,386.178,447.098,0,0,0,0

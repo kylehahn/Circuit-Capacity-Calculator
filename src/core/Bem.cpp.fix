@@ -1,0 +1,544 @@
+#include "Bem.hpp"
+
+#include <Eigen/Core>
+#include <Eigen/LU>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <numbers>
+#include <stdexcept>
+#include <unordered_map>
+
+#ifdef CCC_HAS_OPENMP
+#include <omp.h>
+#endif
+
+#ifdef CCC_HAS_CUDA
+#include <cuda_runtime.h>
+#include <cusolverDn.h>
+#endif
+
+namespace ccc::core {
+
+// ----------------------------------------------------------------------------
+//  GPU availability probe (cached)
+// ----------------------------------------------------------------------------
+bool gpuAvailable() {
+#ifdef CCC_HAS_CUDA
+    static const bool cached = []() {
+        int n = 0;
+        cudaError_t e = cudaGetDeviceCount(&n);
+        return (e == cudaSuccess) && (n > 0);
+    }();
+    return cached;
+#else
+    return false;
+#endif
+}
+
+namespace {
+constexpr double kEps0 = 8.8541878128e-12;   // F/m
+
+// ------------------------------------------------------------------
+//  Z position of the sensor (= trace) layer's mid-plane.
+// ------------------------------------------------------------------
+double sensorMidZmm(const Model& m) {
+    // Try a layer literally named "sensor" first (legacy default model).
+    double z = 0.0;
+    for (const auto& l : m.layers) {
+        if (l.id == "sensor") return z + l.thickness * 0.5;
+        z += l.thickness;
+    }
+    // Fall back to the first conductor layer (KiCad imports use names like
+    // "F.Cu"). Without this, all panels would sit at z = 0.
+    z = 0.0;
+    for (const auto& l : m.layers) {
+        if (l.isConductor) return z + l.thickness * 0.5;
+        z += l.thickness;
+    }
+    return 0.0;
+}
+
+// ------------------------------------------------------------------
+//  Green-function pieces. Self panel uses analytic square-plate
+//  potential; off-diagonal uses centroid-to-centroid 1/r weighted by
+//  panel area.
+// ------------------------------------------------------------------
+inline double greenSelf(const Panel& p, double epsEff) {
+    // V_center = sigma * a * ln(1+sqrt(2)) / (2 pi eps)
+    const double a = p.a * 1e-3;   // mm -> m
+    return a * std::log(1.0 + std::numbers::sqrt2) / (2.0 * std::numbers::pi * kEps0 * epsEff);
+}
+inline double greenOff(const Panel& pi, const Panel& pj, double epsEff,
+                       bool withImage, double imageZmm) {
+    const double dx = (pi.x - pj.x) * 1e-3;
+    const double dy = (pi.y - pj.y) * 1e-3;
+    const double dz = (pi.z - pj.z) * 1e-3;
+    const double r  = std::sqrt(dx * dx + dy * dy + dz * dz) + 1e-12;
+    const double A  = pj.area * 1e-6;            // mm^2 -> m^2
+    double P = A / (4.0 * std::numbers::pi * kEps0 * epsEff * r);
+    if (withImage) {
+        const double dzi = (pi.z - (2.0 * imageZmm - pj.z)) * 1e-3;
+        const double ri  = std::sqrt(dx * dx + dy * dy + dzi * dzi) + 1e-12;
+        P -= A / (4.0 * std::numbers::pi * kEps0 * epsEff * ri);
+    }
+    return P;
+}
+
+// ----------------------------------------------------------------------------
+//  Matrix-free A*x for the BEM influence matrix. y_i = sum_j P_ij * x_j with
+//  P assembled on-the-fly (O(N) memory). OpenMP-parallel over rows.
+// ----------------------------------------------------------------------------
+void bemMatvec(const std::vector<Panel>& panels,
+               double epsEff, bool withImage, double imageZmm,
+               const Eigen::VectorXd& x, Eigen::VectorXd& y) {
+    const int N = int(panels.size());
+#ifdef CCC_HAS_OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
+    for (int i = 0; i < N; ++i) {
+        double sum = greenSelf(panels[i], epsEff) * x(i);
+        for (int j = 0; j < N; ++j) {
+            if (j == i) continue;
+            sum += greenOff(panels[i], panels[j], epsEff, withImage, imageZmm) * x(j);
+        }
+        y(i) = sum;
+    }
+}
+
+// ----------------------------------------------------------------------------
+//  BiCGStab. Solves A*x = b where A is provided as a matvec callback, never
+//  stored explicitly. Returns final relative residual; sets `iters` to the
+//  number of iterations actually run. Throws "BEM cancelled" if stopFlag set.
+// ----------------------------------------------------------------------------
+template <class MatVec>
+double bicgstab(MatVec&& matvec,
+                const Eigen::VectorXd& b,
+                Eigen::VectorXd&       x,
+                int     maxIter,
+                double  tol,
+                int&    iters,
+                const std::atomic<bool>* stop) {
+    const int N = int(b.size());
+    Eigen::VectorXd r(N), r0(N), p(N), v(N), s(N), t(N), Ax(N);
+    matvec(x, Ax);
+    r  = b - Ax;
+    r0 = r;
+    p.setZero();
+    v.setZero();
+    double rho = 1.0, alpha = 1.0, omega = 1.0;
+    const double bnorm = std::max(b.norm(), 1.0e-300);
+    iters = 0;
+    while (iters < maxIter) {
+        if (stop && stop->load(std::memory_order_relaxed))
+            throw std::runtime_error("BEM cancelled");
+        const double rnorm = r.norm();
+        if (rnorm <= tol * bnorm) return rnorm / bnorm;
+        const double rho_new = r0.dot(r);
+        if (std::abs(rho_new) < 1e-300) return rnorm / bnorm;   // breakdown
+        const double beta = (rho_new / rho) * (alpha / omega);
+        p = r + beta * (p - omega * v);
+        matvec(p, v);
+        const double r0v = r0.dot(v);
+        if (std::abs(r0v) < 1e-300) return rnorm / bnorm;
+        alpha = rho_new / r0v;
+        s = r - alpha * v;
+        if (s.norm() <= tol * bnorm) {
+            x += alpha * p;
+            iters++;
+            return s.norm() / bnorm;
+        }
+        matvec(s, t);
+        const double tt = t.dot(t);
+        if (std::abs(tt) < 1e-300) return s.norm() / bnorm;
+        omega = t.dot(s) / tt;
+        x += alpha * p + omega * s;
+        r = s - omega * t;
+        rho = rho_new;
+        iters++;
+    }
+    return r.norm() / bnorm;
+}
+}  // namespace
+
+// ============================================================================
+//  Panelisation
+// ============================================================================
+std::vector<Panel> panelizePad(const Pad& p, double zCenter, double panelSize) {
+    std::vector<Panel> out;
+    const double pz = zCenter;
+
+    auto pushSquare = [&](double cx, double cy, double s) {
+        out.push_back({cx, cy, pz, s * s, s});
+    };
+
+    // Honour the user's panel-size choice exactly. Total panel count is the
+    // user's responsibility; the dialog shows live N + memory + ETA so they
+    // can pick a sane size before hitting Compute.
+    const double pSize = panelSize;
+
+    switch (p.shape) {
+        case PadShape::Circle: {
+            const double R = p.size * 0.5;
+            const int N = std::max(1, int(std::ceil(2.0 * R / pSize)));
+            const double s = (2.0 * R) / N;
+            for (int i = 0; i < N; ++i) for (int j = 0; j < N; ++j) {
+                const double cx = p.x - R + (i + 0.5) * s;
+                const double cy = p.y - R + (j + 0.5) * s;
+                if ((cx - p.x) * (cx - p.x) + (cy - p.y) * (cy - p.y) <= R * R) pushSquare(cx, cy, s);
+            }
+            return out;
+        }
+        case PadShape::Square: {
+            const double S = p.size;
+            const int N = std::max(1, int(std::round(S / pSize)));
+            const double s = S / N;
+            for (int i = 0; i < N; ++i) for (int j = 0; j < N; ++j) {
+                pushSquare(p.x - S * 0.5 + (i + 0.5) * s, p.y - S * 0.5 + (j + 0.5) * s, s);
+            }
+            return out;
+        }
+        case PadShape::Ellipse: {
+            const double Rx = p.size * 0.5;
+            const double Ry = (p.size2 == 0 ? p.size : p.size2) * 0.5;
+            const int Nx = std::max(1, int(std::ceil(2.0 * Rx / pSize)));
+            const int Ny = std::max(1, int(std::ceil(2.0 * Ry / pSize)));
+            const double sx = (2.0 * Rx) / Nx, sy = (2.0 * Ry) / Ny;
+            for (int i = 0; i < Nx; ++i) for (int j = 0; j < Ny; ++j) {
+                const double cx = p.x - Rx + (i + 0.5) * sx;
+                const double cy = p.y - Ry + (j + 0.5) * sy;
+                const double dx = (cx - p.x) / Rx, dy = (cy - p.y) / Ry;
+                if (dx * dx + dy * dy <= 1.0)
+                    out.push_back({cx, cy, pz, sx * sy, std::sqrt(sx * sy)});
+            }
+            return out;
+        }
+        case PadShape::RoundedSquare: {
+            const double S = p.size;
+            const double R = std::min(p.size2 == 0 ? S * 0.2 : p.size2, S * 0.5);
+            const int N = std::max(1, int(std::round(S / pSize)));
+            const double s = S / N;
+            for (int i = 0; i < N; ++i) for (int j = 0; j < N; ++j) {
+                const double cx = p.x - S * 0.5 + (i + 0.5) * s;
+                const double cy = p.y - S * 0.5 + (j + 0.5) * s;
+                const double lx = std::abs(cx - p.x), ly = std::abs(cy - p.y);
+                if (lx > S * 0.5 - R && ly > S * 0.5 - R) {
+                    const double ex = lx - (S * 0.5 - R), ey = ly - (S * 0.5 - R);
+                    if (ex * ex + ey * ey > R * R) continue;
+                }
+                pushSquare(cx, cy, s);
+            }
+            return out;
+        }
+    }
+    return out;
+}
+
+std::vector<Panel> panelizeFpc(const FpcPad& f, double zCenter, double panelSize) {
+    std::vector<Panel> out;
+    // No per-element clamp; user's panelSize is honoured directly.
+    const int Nx = std::max(1, int(std::round(f.width  / panelSize)));
+    const int Ny = std::max(1, int(std::round(f.height / panelSize)));
+    const double sx = f.width / Nx, sy = f.height / Ny;
+    for (int i = 0; i < Nx; ++i) for (int j = 0; j < Ny; ++j) {
+        out.push_back({f.x - f.width  * 0.5 + (i + 0.5) * sx,
+                       f.y - f.height * 0.5 + (j + 0.5) * sy,
+                       zCenter, sx * sy, std::sqrt(sx * sy)});
+    }
+    return out;
+}
+
+std::vector<Panel> panelizeTrace(const Trace& t, const Model& m,
+                                 double zCenter, double panelSize) {
+    // Build full polyline (including endpoint anchors at pad/fpc centers)
+    auto findXY = [&](const std::string& id, double& x, double& y) {
+        for (const auto& p : m.pads)    if (p.id == id) { x = p.x; y = p.y; return true; }
+        for (const auto& f : m.fpcPads) if (f.id == id) { x = f.x; y = f.y; return true; }
+        return false;
+    };
+    std::vector<std::pair<double, double>> pts;
+    double x, y;
+    if (findXY(t.from, x, y)) pts.emplace_back(x, y);
+    for (const auto& w : t.waypoints) pts.emplace_back(w[0], w[1]);
+    if (findXY(t.to, x, y)) pts.emplace_back(x, y);
+
+    std::vector<Panel> out;
+    const double W = t.width;
+    // No clamps: the user's panelSize is honoured exactly. The dialog shows
+    // live total panel count + memory + ETA so the user can choose a sane
+    // size; the Cancel button is the bail-out for runs that turn out too
+    // expensive.
+    for (size_t i = 0; i + 1 < pts.size(); ++i) {
+        const double x0 = pts[i].first,  y0 = pts[i].second;
+        const double x1 = pts[i + 1].first, y1 = pts[i + 1].second;
+        const double dx = x1 - x0, dy = y1 - y0;
+        const double L  = std::sqrt(dx * dx + dy * dy);
+        if (L < 1e-6) continue;
+        const double ux = dx / L, uy = dy / L, px = -uy, py = ux;
+        const int nPerp = std::max(1, int(std::round(W / panelSize)));
+        const int nLong = std::max(1, int(std::round(L / panelSize)));
+        const double dP = W / nPerp;
+        const double dL = L / nLong;
+        for (int il = 0; il < nLong; ++il) {
+            const double sl = (il + 0.5) * dL;
+            for (int ip = 0; ip < nPerp; ++ip) {
+                const double sp = (ip + 0.5) * dP - W * 0.5;
+                out.push_back({x0 + ux * sl + px * sp,
+                               y0 + uy * sl + py * sp,
+                               zCenter, dL * dP, std::sqrt(dL * dP)});
+            }
+        }
+    }
+    return out;
+}
+
+// ----------------------------------------------------------------------------
+//  Zone (pour) panelisation: rasterise the bounding box and keep cells whose
+//  centre is inside the polygon outline. Uses an even-odd ray cast.
+// ----------------------------------------------------------------------------
+std::vector<Panel> panelizeZone(const Zone& z, double zCenter, double panelSize) {
+    std::vector<Panel> out;
+    const auto& pts = z.outline;
+    if (pts.size() < 3 || panelSize <= 0) return out;
+    double xMin = pts[0][0], xMax = pts[0][0];
+    double yMin = pts[0][1], yMax = pts[0][1];
+    for (const auto& p : pts) {
+        xMin = std::min(xMin, p[0]); xMax = std::max(xMax, p[0]);
+        yMin = std::min(yMin, p[1]); yMax = std::max(yMax, p[1]);
+    }
+    const int Nx = std::max(1, int(std::ceil((xMax - xMin) / panelSize)));
+    const int Ny = std::max(1, int(std::ceil((yMax - yMin) / panelSize)));
+    const double sx = (xMax - xMin) / Nx;
+    const double sy = (yMax - yMin) / Ny;
+    auto inside = [&](double tx, double ty) {
+        bool in = false;
+        const size_t n = pts.size();
+        for (size_t i = 0, j = n - 1; i < n; j = i++) {
+            const double xi = pts[i][0], yi = pts[i][1];
+            const double xj = pts[j][0], yj = pts[j][1];
+            if (((yi > ty) != (yj > ty))
+                && (tx < (xj - xi) * (ty - yi) / (yj - yi + 1e-30) + xi))
+                in = !in;
+        }
+        return in;
+    };
+    for (int i = 0; i < Nx; ++i) for (int j = 0; j < Ny; ++j) {
+        const double cx = xMin + (i + 0.5) * sx;
+        const double cy = yMin + (j + 0.5) * sy;
+        if (inside(cx, cy))
+            out.push_back({cx, cy, zCenter, sx * sy, std::sqrt(sx * sy)});
+    }
+    return out;
+}
+
+std::vector<Panel> panelizeConductor(const ConductorRefs& c, const Model& m,
+                                     double psPad, double psFpc, double psTrace) {
+    const double zMid = sensorMidZmm(m);
+    std::vector<Panel> out;
+
+    // Build id -> pointer indices once. The previous implementation linearly
+    // scanned m.pads / m.traces / m.zones for *every* id in ConductorRefs,
+    // which is O(N_total * N_in_net). On a KiCad PCB with ~1900 segments
+    // and a GND net containing ~1000 of them, that was ~2M string compares
+    // per panelize call -- a noticeable chunk of the per-Compute startup.
+    std::unordered_map<std::string, const Pad*>    padIdx;    padIdx.reserve(m.pads.size());
+    std::unordered_map<std::string, const FpcPad*> fpcIdx;    fpcIdx.reserve(m.fpcPads.size());
+    std::unordered_map<std::string, const Trace*>  traceIdx;  traceIdx.reserve(m.traces.size());
+    std::unordered_map<std::string, const Zone*>   zoneIdx;   zoneIdx.reserve(m.zones.size());
+    for (const auto& p : m.pads)    padIdx.emplace(p.id, &p);
+    for (const auto& f : m.fpcPads) fpcIdx.emplace(f.id, &f);
+    for (const auto& t : m.traces)  traceIdx.emplace(t.id, &t);
+    for (const auto& z : m.zones)   zoneIdx.emplace(z.id, &z);
+
+    for (const auto& id : c.padIds) {
+        auto it = padIdx.find(id);
+        if (it != padIdx.end()) {
+            auto pp = panelizePad(*it->second, zMid, psPad);
+            out.insert(out.end(), pp.begin(), pp.end());
+        }
+    }
+    for (const auto& id : c.fpcIds) {
+        auto it = fpcIdx.find(id);
+        if (it != fpcIdx.end()) {
+            auto pp = panelizeFpc(*it->second, zMid, psFpc);
+            out.insert(out.end(), pp.begin(), pp.end());
+        }
+    }
+    for (const auto& id : c.traceIds) {
+        auto it = traceIdx.find(id);
+        if (it != traceIdx.end()) {
+            auto pp = panelizeTrace(*it->second, m, zMid, psTrace);
+            out.insert(out.end(), pp.begin(), pp.end());
+        }
+    }
+    for (const auto& id : c.zoneIds) {
+        auto it = zoneIdx.find(id);
+        if (it != zoneIdx.end()) {
+            // Zones use the pad panel size by default (typical pour ~mm-scale
+            // but the user can override via panelSize).
+            auto pp = panelizeZone(*it->second, zMid, psPad);
+            out.insert(out.end(), pp.begin(), pp.end());
+        }
+    }
+    return out;
+}
+
+// Legacy single-size overload: uses the same panelSize for all element types.
+std::vector<Panel> panelizeConductor(const ConductorRefs& c, const Model& m, double panelSize) {
+    return panelizeConductor(c, m, panelSize, panelSize, panelSize);
+}
+
+// ============================================================================
+//  Solve
+// ============================================================================
+BemResult computeMutualCapacitance(const std::vector<Panel>& A,
+                                    const std::vector<Panel>& B,
+                                    const Model& model,
+                                    const BemOptions& opts) {
+    BemResult R;
+    R.NA = int(A.size());
+    R.NB = int(B.size());
+    const int N = R.NA + R.NB;
+    if (N < 2) throw std::runtime_error("BEM: need at least 2 panels (A or B is empty)");
+    // No hard panel-count cap; clamps were removed from the panelisers so
+    // user picks panel size and gets exactly that.
+
+    std::vector<Panel> panels;
+    panels.reserve(N);
+    panels.insert(panels.end(), A.begin(), A.end());
+    panels.insert(panels.end(), B.begin(), B.end());
+
+    const double imageZ = -model.glass.thickness;
+    const double epsEff = opts.epsEff;
+
+    using Eigen::MatrixXd;
+    using Eigen::VectorXd;
+    using Eigen::Matrix;
+
+    const std::atomic<bool>* stop = opts.stopFlag;
+
+    // Two RHS: V_A=1 V_B=0, then V_A=0 V_B=1
+    Matrix<double, Eigen::Dynamic, 2> V(N, 2);
+    V.setZero();
+    for (int i = 0; i < R.NA; ++i) V(i, 0) = 1.0;
+    for (int i = R.NA; i < N;     ++i) V(i, 1) = 1.0;
+    Matrix<double, Eigen::Dynamic, 2> sigma(N, 2);
+
+    auto t0 = std::chrono::steady_clock::now();
+    auto t1 = t0;
+    auto t2 = t0;
+
+    if (opts.solver == BemSolver::BiCGStab) {
+        // Matrix-free: never allocate the N x N matrix. O(N) memory.
+        auto matvec = [&](const VectorXd& x, VectorXd& y) {
+            bemMatvec(panels, epsEff, opts.imageShield, imageZ, x, y);
+            if (stop && stop->load(std::memory_order_relaxed))
+                throw std::runtime_error("BEM cancelled");
+        };
+        t1 = std::chrono::steady_clock::now();   // no assemble phase
+
+        VectorXd x1 = VectorXd::Zero(N);
+        VectorXd x2 = VectorXd::Zero(N);
+        VectorXd b1 = V.col(0);
+        VectorXd b2 = V.col(1);
+        R.residual[0] = bicgstab(matvec, b1, x1,
+                                 opts.iterMaxIters, opts.iterTol,
+                                 R.iters[0], stop);
+        if (stop && stop->load(std::memory_order_relaxed))
+            throw std::runtime_error("BEM cancelled");
+        R.residual[1] = bicgstab(matvec, b2, x2,
+                                 opts.iterMaxIters, opts.iterTol,
+                                 R.iters[1], stop);
+        sigma.col(0) = x1;
+        sigma.col(1) = x2;
+        t2 = std::chrono::steady_clock::now();
+    } else {
+        // Dense direct path: assemble N x N matrix, then LU solve.
+        MatrixXd P(N, N);
+#ifdef CCC_HAS_OPENMP
+        #pragma omp parallel for schedule(static)
+#endif
+        for (int i = 0; i < N; ++i) {
+            if (stop && stop->load(std::memory_order_relaxed)) continue;
+            for (int j = 0; j < N; ++j) {
+                P(i, j) = (i == j) ? greenSelf(panels[i], epsEff)
+                                   : greenOff(panels[i], panels[j], epsEff,
+                                              opts.imageShield, imageZ);
+            }
+        }
+        if (stop && stop->load(std::memory_order_relaxed))
+            throw std::runtime_error("BEM cancelled");
+        t1 = std::chrono::steady_clock::now();
+
+        if (opts.useGpu) {
+#ifdef CCC_HAS_CUDA
+            if (!gpuAvailable())
+                throw std::runtime_error(
+                    "BEM: GPU requested but no CUDA device is visible.");
+            cusolverDnHandle_t handle = nullptr;
+            cusolverDnCreate(&handle);
+            double *dA = nullptr, *dB = nullptr, *dWork = nullptr;
+            int    *dPiv = nullptr, *dInfo = nullptr;
+            const size_t bytesA = size_t(N) * size_t(N) * sizeof(double);
+            const size_t bytesB = size_t(N) * 2          * sizeof(double);
+            cudaMalloc(&dA, bytesA);
+            cudaMalloc(&dB, bytesB);
+            cudaMalloc(&dPiv, size_t(N) * sizeof(int));
+            cudaMalloc(&dInfo, sizeof(int));
+            cudaMemcpy(dA, P.data(), bytesA, cudaMemcpyHostToDevice);
+            cudaMemcpy(dB, V.data(), bytesB, cudaMemcpyHostToDevice);
+            int wsz = 0;
+            cusolverDnDgetrf_bufferSize(handle, N, N, dA, N, &wsz);
+            cudaMalloc(&dWork, size_t(wsz) * sizeof(double));
+            cusolverDnDgetrf(handle, N, N, dA, N, dWork, dPiv, dInfo);
+            cusolverDnDgetrs(handle, CUBLAS_OP_N, N, 2, dA, N, dPiv, dB, N, dInfo);
+            cudaMemcpy(sigma.data(), dB, bytesB, cudaMemcpyDeviceToHost);
+            cudaFree(dWork); cudaFree(dInfo); cudaFree(dPiv);
+            cudaFree(dB);    cudaFree(dA);
+            cusolverDnDestroy(handle);
+#else
+            throw std::runtime_error(
+                "BEM: GPU path not compiled in. Rebuild with "
+                "-DCCC_ENABLE_CUDA=ON and a CUDA Toolkit installation.");
+#endif
+        } else {
+            sigma = P.partialPivLu().solve(V);
+        }
+        t2 = std::chrono::steady_clock::now();
+    }
+
+    // Charges (mm^2 -> m^2)
+    auto sumQ = [&](int col, int rowStart, const std::vector<Panel>& src) {
+        double q = 0.0;
+        for (int i = 0; i < int(src.size()); ++i)
+            q += sigma(rowStart + i, col) * (src[i].area * 1e-6);
+        return q;
+    };
+    const double Q1A = sumQ(0, 0,    A);
+    const double Q1B = sumQ(0, R.NA, B);
+    const double Q2A = sumQ(1, 0,    A);
+    const double Q2B = sumQ(1, R.NA, B);
+    R.CM[0][0] = Q1A;  R.CM[0][1] = Q2A;
+    R.CM[1][0] = Q1B;  R.CM[1][1] = Q2B;
+    R.Cm     = -0.5 * (R.CM[0][1] + R.CM[1][0]);
+    R.CselfA =  R.CM[0][0] + R.CM[0][1];
+    R.CselfB =  R.CM[1][0] + R.CM[1][1];
+
+    R.assembleMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    R.solveMs    = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    return R;
+}
+
+std::string formatCapacitance(double f) {
+    const double a = std::abs(f);
+    char buf[64];
+    if (a >= 1e-9)  { std::snprintf(buf, sizeof(buf), "%.4f nF", f * 1e9 ); return buf; }
+    if (a >= 1e-12) { std::snprintf(buf, sizeof(buf), "%.4f pF", f * 1e12); return buf; }
+    if (a >= 1e-15) { std::snprintf(buf, sizeof(buf), "%.4f fF", f * 1e15); return buf; }
+    if (a >= 1e-18) { std::snprintf(buf, sizeof(buf), "%.4f aF", f * 1e18); return buf; }
+    std::snprintf(buf, sizeof(buf), "%.3e F", f);
+    return buf;
+}
+
+}  // namespace ccc::core
